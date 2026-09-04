@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Build libchiaki (from chiaki-ng) as static libraries + headers.
+#
+# Validated on: Windows 11 + MSYS2 mingw64 (run inside the MINGW64 shell).
+# Linux (apt/dnf) and macOS (brew) paths follow upstream docs.
+#
+# Output layout (consumed by the libchiaki binding via LIBCHIAKI_PREFIX):
+#   $PREFIX/include/chiaki/*.h (+ remote/, config.h, takion.pb.h)
+#   $PREFIX/include/pb*.h              (nanopb runtime headers)
+#   $PREFIX/lib/libchiaki.a libcurl.a libgf_complete.a
+#               libjerasure.a libprotobuf-nanopb.a
+#
+# Config (environment variables; proxy needs no flags: https_proxy /
+# http_proxy are honored automatically by git, pacman and curl):
+#
+#   LIBCHIAKI_PREFIX    (required) install prefix
+#   CHIAKI_VERSION      git tag/branch/commit, default v1.10.0
+#   CHIAKI_REPO         default https://github.com/streetpea/chiaki-ng.git
+#   CHIAKI_SRC_DIR      default ./chiaki-ng-src
+#   BUILD_TYPE          default Release
+#   JOBS                default nproc
+#   SKIP_DEPS=1         skip system package installation
+#
+# Example (MSYS2 MINGW64 shell):
+#   export LIBCHIAKI_PREFIX=/e/build/libchiaki-install
+#   ./scripts/build-chiaki.sh
+set -euo pipefail
+
+: "${LIBCHIAKI_PREFIX:?set LIBCHIAKI_PREFIX to the install prefix first}"
+CHIAKI_VERSION="${CHIAKI_VERSION:-v1.10.0}"
+CHIAKI_REPO="${CHIAKI_REPO:-https://github.com/streetpea/chiaki-ng.git}"
+CHIAKI_SRC_DIR="${CHIAKI_SRC_DIR:-$(pwd)/chiaki-ng-src}"
+BUILD_TYPE="${BUILD_TYPE:-Release}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+SKIP_DEPS="${SKIP_DEPS:-0}"
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+	sed -n '2,/^set /p' "$0"
+	exit 0
+fi
+
+# Normalize Windows-style paths when running under MSYS2/Cygwin.
+normpath() {
+	if command -v cygpath >/dev/null 2>&1; then
+		cygpath -u "$1"
+	else
+		printf '%s' "$1"
+	fi
+}
+
+PREFIX="$(normpath "$LIBCHIAKI_PREFIX")"
+SRC="$(normpath "$CHIAKI_SRC_DIR")"
+BUILD_DIR="$SRC/build-lib"
+OS="$(uname -s)"
+
+log() { echo "[build-chiaki] $*"; }
+
+# ---------- 1. system dependencies ----------
+MINGW_PKGS="git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
+	mingw-w64-x86_64-pkgconf mingw-w64-x86_64-protobuf \
+	mingw-w64-x86_64-python mingw-w64-x86_64-python-protobuf \
+	mingw-w64-x86_64-openssl mingw-w64-x86_64-opus mingw-w64-x86_64-json-c \
+	mingw-w64-x86_64-libevent mingw-w64-x86_64-miniupnpc"
+
+if [ "$SKIP_DEPS" != "1" ]; then
+	case "$OS" in
+		MINGW* | MSYS* | CYGWIN*)
+			# shellcheck disable=SC2086
+			pacman -Sy --noconfirm && pacman -S --noconfirm --needed $MINGW_PKGS
+			;;
+		Linux*)
+			if command -v apt-get >/dev/null 2>&1; then
+				sudo apt-get update
+				sudo apt-get install -y git cmake ninja-build pkg-config build-essential \
+					libssl-dev libopus-dev libjson-c-dev libevent-dev libminiupnpc-dev \
+					protobuf-compiler python3 python3-protobuf
+			elif command -v dnf >/dev/null 2>&1; then
+				sudo dnf install -y git cmake ninja-build pkgconf gcc \
+					openssl-devel opus-devel json-c-devel libevent-devel miniupnpc-devel \
+					protobuf-compiler python3 python3-protobuf
+			else
+				echo "need apt-get or dnf to install dependencies" >&2
+				exit 1
+			fi
+			;;
+		Darwin*)
+			command -v brew >/dev/null 2>&1 || {
+				echo "need Homebrew to install dependencies" >&2
+				exit 1
+			}
+			brew install git cmake ninja pkg-config \
+				openssl opus json-c libevent miniupnpc protobuf python
+			;;
+		*)
+			echo "unsupported OS: $OS" >&2
+			exit 1
+			;;
+	esac
+fi
+
+# ---------- 2. source + submodules ----------
+# Only the submodules needed for a lib-only static build
+# (cpp-steam-tools/munit/oboe/borealis are GUI/CLI/test-only).
+SUBMODULES="third-party/nanopb third-party/jerasure third-party/gf-complete third-party/curl"
+
+if [ -d "$SRC/.git" ]; then
+	log "using existing source: $SRC"
+	# Judge submodule state via `git submodule status` (leading '-' not
+	# checked out, '+' wrong commit, 'U' conflict), not a sentinel file.
+	if git -C "$SRC" submodule status $SUBMODULES 2>/dev/null | grep -q '^[-+U]'; then
+		log "submodules not ready; initializing"
+		# shellcheck disable=SC2086
+		git -C "$SRC" submodule update --init $SUBMODULES
+		if git -C "$SRC" submodule status $SUBMODULES | grep -q '^[-+U]'; then
+			echo "submodules not ready" >&2
+			git -C "$SRC" submodule status >&2
+			exit 1
+		fi
+	fi
+else
+	log "cloning $CHIAKI_REPO -> $SRC"
+	git clone "$CHIAKI_REPO" "$SRC"
+	git -C "$SRC" checkout "$CHIAKI_VERSION"
+	# shellcheck disable=SC2086
+	git -C "$SRC" submodule update --init $SUBMODULES
+fi
+log "submodules ready"
+
+# ---------- 3. configure + build (lib only, static) ----------
+CMAKE_FLAGS="-G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+	-DCHIAKI_ENABLE_GUI=OFF \
+	-DCHIAKI_ENABLE_CLI=OFF \
+	-DCHIAKI_ENABLE_TESTS=OFF \
+	-DCHIAKI_ENABLE_SETSU=OFF \
+	-DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF \
+	-DCHIAKI_ENABLE_STEAM_SHORTCUT=OFF \
+	-DCHIAKI_ENABLE_SPEEX=OFF \
+	-DCHIAKI_ENABLE_FFMPEG_DECODER=OFF"
+if [ "$OS" = "Darwin" ]; then
+	CMAKE_FLAGS="$CMAKE_FLAGS -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)"
+fi
+# curl is used by chiaki purely over HTTP/1.1 (no CURLOPT_HTTP_VERSION=2
+# anywhere in lib/); force the bundled curl off nghttp2/HTTP2 so it neither
+# pulls a libnghttp2 dependency nor carries dead http2 code into the static
+# lib. Disabling it has no functional impact on remote play.
+CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF"
+
+# STATIC SWITCH: this is the only STATIC macro the whole stack actually needs.
+# nm on the produced libchiaki.a confirms the only third-party __imp_ (DLL
+# import) references come from miniupnpc: miniupnpc_declspec.h forces
+# __declspec(dllimport) on _WIN32 unless MINIUPNP_STATICLIB is defined, which
+# pins a runtime libminiupnpc.dll dependency that gc-sections cannot drop.
+# Defining it makes holepunch.c reference the plain `upnpDiscover` symbol that
+# MSYS2's static libminiupnpc.a provides. https2 (nghttp2), curl, libevent,
+# openssl, opus, json-c, idn2 .etc. do NOT emit any __imp_ here (verified by
+# nm), so no per-library macros are needed and USE_NGHTTP2=OFF already removed
+# nghttp2 entirely.
+export CFLAGS="${CFLAGS:-} -ffunction-sections -fdata-sections -DMINIUPNP_STATICLIB"
+# shellcheck disable=SC2086
+cmake -S "$SRC" -B "$BUILD_DIR" $CMAKE_FLAGS
+cmake --build "$BUILD_DIR" --target chiaki-lib -j "$JOBS"
+
+# ---------- 4. collect into $PREFIX ----------
+log "collecting into $PREFIX"
+rm -rf "$PREFIX/include/chiaki"
+rm -f "$PREFIX/lib/libchiaki.a" "$PREFIX/lib/libcurl.a" \
+	"$PREFIX/lib/libgf_complete.a" "$PREFIX/lib/libjerasure.a" \
+	"$PREFIX/lib/libprotobuf-nanopb.a" "$PREFIX/lib/libcpp-steam-tools.dll.a"
+mkdir -p "$PREFIX/include/chiaki/remote" "$PREFIX/lib"
+
+cp "$SRC/lib/include/chiaki/"*.h "$PREFIX/include/chiaki/"
+# Only built when the matching option is ON (both OFF here).
+rm -f "$PREFIX/include/chiaki/ffmpegdecoder.h" "$PREFIX/include/chiaki/pidecoder.h"
+cp "$SRC/lib/include/chiaki/remote/"*.h "$PREFIX/include/chiaki/remote/"
+cp "$BUILD_DIR/lib/include/chiaki/config.h" "$PREFIX/include/chiaki/config.h"
+cp "$BUILD_DIR/lib/protobuf/takion.pb.h" "$PREFIX/include/chiaki/takion.pb.h"
+# takion.pb.h does `#include <pb.h>`.
+cp "$SRC/third-party/nanopb/pb.h" "$SRC/third-party/nanopb/pb_common.h" \
+	"$SRC/third-party/nanopb/pb_decode.h" "$SRC/third-party/nanopb/pb_encode.h" \
+	"$PREFIX/include/"
+cp "$BUILD_DIR/lib/libchiaki.a" \
+	"$BUILD_DIR/third-party/curl/lib/libcurl.a" \
+	"$BUILD_DIR/third-party/libgf_complete.a" \
+	"$BUILD_DIR/third-party/libjerasure.a" \
+	"$BUILD_DIR/third-party/nanopb/libprotobuf-nanopb.a" \
+	"$PREFIX/lib/"
+
+# ---------- 5. verify ----------
+NM="$(command -v nm || command -v llvm-nm || true)"
+if [ -z "$NM" ]; then
+	log "WARNING: nm not found, skipping symbol check"
+else
+	for sym in chiaki_lib_init chiaki_session_init chiaki_session_start \
+		chiaki_discovery_service_init chiaki_regist_start; do
+		"$NM" -g --defined-only "$PREFIX/lib/libchiaki.a" | grep -q " $sym\$" ||
+			{
+				echo "missing symbol: $sym" >&2
+				exit 1
+			}
+	done
+	log "symbols OK"
+fi
+
+log "done. For the rust binding: export LIBCHIAKI_PREFIX=$PREFIX"
