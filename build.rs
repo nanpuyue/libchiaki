@@ -11,33 +11,98 @@ const STATIC_LIBS: &[&str] = &[
     "protobuf-nanopb",
 ];
 
+// Windows/macOS 都链接前缀/MSYS2 内的静态库, 这份清单两者一致。
+// Linux 走 pkg-config (见 link_platform_deps), 不用这份清单。
+const COMMON_DEPS: &[&str] = &["ssl", "crypto", "opus", "json-c", "miniupnpc", "event"];
+
+// Linux: 系统包管理器的依赖, 库名/版本随发行版变化, 交由 pkg-config
+// 定位并自动补齐搜索路径与传递依赖。探测失败时退回裸 -l (裸名见第二列),
+// 兼容没有 .pc 文件的环境。
+const PKG_DEPS: &[(&str, &[&str])] = &[
+    ("openssl", &["ssl", "crypto"]),
+    ("opus", &["opus"]),
+    ("json-c", &["json-c"]),
+    ("libevent", &["event"]),
+    ("miniupnpc", &["miniupnpc"]),
+    ("zlib", &["z"]),
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum TargetOs {
+    Windows,
+    Linux,
+    MacOS,
+}
+
 fn main() {
-    println!("cargo:rerun-if-env-changed=LIBCHIAKI_PREFIX");
-    println!("cargo:rerun-if-env-changed=MINGW_PREFIX");
-    println!("cargo:rerun-if-env-changed=MSYS2_ROOT");
-    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
-
     let target = env::var("TARGET").expect("TARGET not set");
-    let is_windows = target.contains("windows");
-    let is_macos = target.contains("apple");
-    let is_linux = target.contains("linux");
+    let os = target_os(&target);
 
-    if is_windows && !target.contains("gnu") {
-        panic!(
+    println!("cargo:rerun-if-env-changed=LIBCHIAKI_PREFIX");
+    if os == TargetOs::Windows {
+        // 这三个只影响 Windows 的 mingw sysroot / libclang 探测,
+        // 其余平台读它们没有意义, 不声明以免无谓的重新构建。
+        println!("cargo:rerun-if-env-changed=MINGW_PREFIX");
+        println!("cargo:rerun-if-env-changed=MSYS2_ROOT");
+        println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
+    }
+
+    // --- link ---
+    let (include_dir, lib_dir) = chiaki_prefix();
+    link_stack(&lib_dir);
+    link_platform_deps(os);
+
+    // --- bindgen ---
+    if os == TargetOs::Windows {
+        ensure_libclang();
+    }
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let bindings = build_bindings(&include_dir, &out);
+
+    // wrap_static_fns 生成的 C 包装: chiaki 头文件里的 `static inline`
+    // 辅助函数在 libchiaki.a 里没有符号, bindgen 也生成不了函数体,
+    // 这里把 bindgen 写出的包装 C 文件用真实 C 编译器编译成符号。
+    cc::Build::new()
+        .file(out.join("__bindgen.c"))
+        .include(include_dir)
+        .opt_level(2)
+        .warnings(false)
+        .compile("bindgen_wrappers");
+
+    bindings
+        .write_to_file(out.join("bindings.rs"))
+        .expect("failed to write bindings");
+}
+
+/// 解析 TARGET 三元组, 不支持的目标直接失败。
+fn target_os(target: &str) -> TargetOs {
+    if target.contains("windows") {
+        // 预编译的 .a 是 MinGW/COFF 格式, 无法与 MSVC 工具链链接。
+        assert!(
+            target.contains("gnu"),
             "libchiaki on Windows requires the GNU toolchain: \
              install the x86_64-pc-windows-gnu target, run from the MSYS2 \
              MINGW64 shell (so the mingw linker is on PATH), and build with \
              `cargo build --target x86_64-pc-windows-gnu`. \
              The prebuilt .a archives are MinGW/COFF and cannot link with MSVC."
         );
+        TargetOs::Windows
+    } else if target.contains("linux") {
+        TargetOs::Linux
+    } else if target.contains("apple") {
+        TargetOs::MacOS
+    } else {
+        panic!("libchiaki: unsupported target {target}");
     }
+}
 
-    let prefix = PathBuf::from(
-        env::var("LIBCHIAKI_PREFIX").expect(
-            "LIBCHIAKI_PREFIX must point at the chiaki dev prefix produced \
+/// 校验并返回 chiaki 开发前缀 (scripts/build-chiaki.sh 的产物,
+/// 布局: include/ + lib/)。
+fn chiaki_prefix() -> (PathBuf, PathBuf) {
+    let prefix = PathBuf::from(env::var("LIBCHIAKI_PREFIX").expect(
+        "LIBCHIAKI_PREFIX must point at the chiaki dev prefix produced \
              by scripts/build-chiaki.sh (layout: include/ + lib/)",
-        ),
-    );
+    ));
     let include_dir = prefix.join("include");
     let lib_dir = prefix.join("lib");
     for must_exist in [
@@ -52,99 +117,81 @@ fn main() {
             must_exist.display()
         );
     }
+    (include_dir, lib_dir)
+}
 
-    // --- linking ---
+/// 静态 chiaki 栈, 各平台一致。
+fn link_stack(lib_dir: &std::path::Path) {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     for lib in STATIC_LIBS {
         println!("cargo:rustc-link-lib=static={lib}");
     }
+}
 
-    if is_windows {
-        // Dynamic deps live in the mingw64 sysroot (import libs).
-        if let Some(mingw_lib) = find_mingw_lib() {
-            println!("cargo:rustc-link-search=native={}", mingw_lib.display());
-        } else {
-            println!(
-                "cargo:warning=mingw sysroot not found (set MINGW_PREFIX or MSYS2_ROOT); \
-                 linking ssl/crypto/opus/json-c/miniupnpc/event may fail"
-            );
-        }
-        // Direct deps (chiaki + third-party static curl's own deps:
-        // ssh2/psl/idn2/nghttp2/z are what curl was configured with).
-        for lib in [
-            "ssl",
-            "crypto",
-            "opus",
-            "json-c",
-            "miniupnpc",
-            "event",
-            "ssh2",
-            "psl",
-            "idn2",
-            "unistring",
-            "iconv",
-            "z",
-        ] {
+/// 平台差异全部收敛在这里: 共通依赖的链接方式 + 各平台特有依赖。
+fn link_platform_deps(os: TargetOs) {
+    match os {
+        TargetOs::Windows => {
+            // Dynamic deps live in the mingw64 sysroot (import libs).
+            match find_mingw_lib() {
+                Some(mingw_lib) => {
+                    println!("cargo:rustc-link-search=native={}", mingw_lib.display())
+                }
+                None => println!(
+                    "cargo:warning=mingw sysroot not found (set MINGW_PREFIX or MSYS2_ROOT); \
+                     linking ssl/crypto/opus/json-c/miniupnpc/event may fail"
+                ),
+            }
             // MSYS2 ships both a static <lib>.a and an import <lib>.dll.a.
             // `static=` pins the former so the final exe carries no extra
             // DLL deps beyond the OS.
-            println!("cargo:rustc-link-lib=static={lib}");
+            for lib in COMMON_DEPS {
+                println!("cargo:rustc-link-lib=static={lib}");
+            }
+            // Third-party static curl's own deps (ssh2/psl/idn2/nghttp2/z
+            // are what curl was configured with).
+            for lib in ["ssh2", "psl", "idn2", "unistring", "iconv", "z"] {
+                println!("cargo:rustc-link-lib=static={lib}");
+            }
+            // Matches chiaki's own CMake (wsock32 ws2_32 bcrypt iphlpapi) plus
+            // what the static Schannel curl / OpenSSL ssh2 / OpenSSL need
+            // (crypt32, advapi32, userenv, shell32, ole32). These are OS libs in
+            // the mingw CRT import libs, so plain (non-static) link is correct.
+            for lib in [
+                "ws2_32", "wsock32", "crypt32", "bcrypt", "iphlpapi", "advapi32", "userenv",
+                "shell32", "ole32",
+            ] {
+                println!("cargo:rustc-link-lib={lib}");
+            }
         }
-        // Matches chiaki's own CMake (wsock32 ws2_32 bcrypt iphlpapi) plus
-        // what the static Schannel curl / OpenSSL ssh2 / OpenSSL need
-        // (crypt32, advapi32, userenv, shell32, ole32). These are OS libs in
-        // the mingw CRT import libs, so plain (non-static) link is correct.
-        for lib in [
-            "ws2_32",
-            "wsock32",
-            "crypt32",
-            "bcrypt",
-            "iphlpapi",
-            "advapi32",
-            "userenv",
-            "shell32",
-            "ole32",
-        ] {
-            println!("cargo:rustc-link-lib={lib}");
+        TargetOs::Linux => {
+            for &(pc, fallback) in PKG_DEPS {
+                match pkg_config::Config::new().probe(pc) {
+                    // pkg_config 自己打印 link-lib/link-search 元数据。
+                    Ok(_) => {}
+                    Err(e) => {
+                        println!("cargo:warning=pkg-config: {e}; 退回裸 -l 链接");
+                        for lib in fallback {
+                            println!("cargo:rustc-link-lib=dylib={lib}");
+                        }
+                    }
+                }
+            }
+            for lib in ["pthread", "m"] {
+                println!("cargo:rustc-link-lib=dylib={lib}");
+            }
         }
-    } else if is_linux {
-        for lib in [
-            "ssl", "crypto", "opus", "json-c", "miniupnpc", "event", "pthread", "m", "z",
-        ] {
-            println!("cargo:rustc-link-lib=dylib={lib}");
+        TargetOs::MacOS => {
+            for lib in COMMON_DEPS {
+                println!("cargo:rustc-link-lib=static={lib}");
+            }
+            for lib in ["m", "z"] {
+                println!("cargo:rustc-link-lib=dylib={lib}");
+            }
+            println!("cargo:rustc-link-lib=framework=CoreServices");
+            println!("cargo:rustc-link-lib=framework=SystemConfiguration");
         }
-    } else if is_macos {
-        for lib in ["ssl", "crypto", "opus", "json-c", "miniupnpc", "event"] {
-            println!("cargo:rustc-link-lib=static={lib}");
-        }
-        for lib in ["m", "z"] {
-            println!("cargo:rustc-link-lib=dylib={lib}");
-        }
-        println!("cargo:rustc-link-lib=framework=CoreServices");
-        println!("cargo:rustc-link-lib=framework=SystemConfiguration");
-    } else {
-        panic!("libchiaki: unsupported target {target}");
     }
-
-    // --- bindgen ---
-    if is_windows {
-        ensure_libclang();
-    }
-    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let bindings = build_bindings(&include_dir, &out);
-    bindings
-        .write_to_file(out.join("bindings.rs"))
-        .expect("failed to write bindings");
-
-    // wrap_static_fns 生成的 C 包装: chiaki 头文件里的 `static inline`
-    // 辅助函数在 libchiaki.a 里没有符号, bindgen 也生成不了函数体,
-    // 这里把 bindgen 写出的包装 C 文件用真实 C 编译器编译成符号。
-    cc::Build::new()
-        .file(out.join("__bindgen.c"))
-        .include(include_dir)
-        .opt_level(2)
-        .warnings(false)
-        .compile("bindgen_wrappers");
 }
 
 /// Locate <mingw64>/lib. Never hardcoded to a single drive:
@@ -177,12 +224,7 @@ fn msys_root() -> Option<PathBuf> {
     if let Ok(r) = env::var("MSYS2_ROOT") {
         cands.push(PathBuf::from(r));
     }
-    for d in [
-        "E:/msys64",
-        "C:/msys64",
-        "C:/tools/msys64",
-        "D:/msys64",
-    ] {
+    for d in ["E:/msys64", "C:/msys64", "C:/tools/msys64", "D:/msys64"] {
         cands.push(PathBuf::from(d));
     }
     cands
