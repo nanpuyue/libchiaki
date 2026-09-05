@@ -11,12 +11,8 @@ const STATIC_LIBS: &[&str] = &[
     "protobuf-nanopb",
 ];
 
-// Windows/macOS 都链接前缀/MSYS2 内的静态库, 这份清单两者一致。
-// Linux 走 pkg-config (见 link_platform_deps), 不用这份清单。
-const COMMON_DEPS: &[&str] = &["ssl", "crypto", "opus", "json-c", "miniupnpc", "event"];
-
-// Linux: 系统包管理器的依赖, 库名/版本随发行版变化, 交由 pkg-config
-// 定位并自动补齐搜索路径与传递依赖。探测失败时退回裸 -l (裸名见第二列),
+// Linux/macOS: 系统包管理器的依赖, 库名/版本随发行版变化, 交由 pkg-config
+// 定位并自动补齐搜索路径。探测失败时退回裸 -l (裸名见第二列),
 // 兼容没有 .pc 文件的环境。
 const PKG_DEPS: &[(&str, &[&str])] = &[
     ("openssl", &["ssl", "crypto"]),
@@ -146,15 +142,16 @@ fn link_platform_deps(os: TargetOs) {
             }
             // MSYS2 ships both a static <lib>.a and an import <lib>.dll.a.
             // `static=` pins the former so the final exe carries no extra
-            // DLL deps beyond the OS.
-            for lib in COMMON_DEPS {
-                println!("cargo:rustc-link-lib=static={lib}");
-            }
-            // Third-party static curl's remaining deps. The optional ones
+            // DLL deps beyond the OS. Same bare-name list as PKG_DEPS'
+            // fallback column: third-party static curl's optional deps
             // (ssh2/psl/idn2/unistring/iconv/brotli/zstd) are disabled in
             // scripts/build-chiaki.sh, so libcurl.a references none of them
             // (nm-verified); only zlib survives.
-            println!("cargo:rustc-link-lib=static=z");
+            for &(_, fallback) in PKG_DEPS {
+                for lib in fallback {
+                    println!("cargo:rustc-link-lib=static={lib}");
+                }
+            }
             // OS libs the chiaki stack itself needs: ws2_32 (Winsock:
             // WSAStartup/WSAIoctl), bcrypt (BCryptGenRandom) and advapi32
             // (CryptAcquireContextW rand fallback + event logging + the
@@ -167,11 +164,21 @@ fn link_platform_deps(os: TargetOs) {
                 println!("cargo:rustc-link-lib={lib}");
             }
         }
-        TargetOs::Linux => {
+        TargetOs::Linux | TargetOs::MacOS => {
+            // pkg-config 定位依赖库的搜索路径 (Homebrew 的 /opt/homebrew/lib
+            // 不在 macOS 链接器默认搜索路径里, 没有 pkg-config 就得靠使用者
+            // 手工设置 RUSTFLAGS=-L)。cargo_metadata=false: 只要路径, 链接
+            // 方式由我们自己发, 保持 static= 语义 (与 Windows 分支一致)。
             for &(pc, fallback) in PKG_DEPS {
-                match pkg_config::Config::new().probe(pc) {
-                    // pkg_config 自己打印 link-lib/link-search 元数据。
-                    Ok(_) => {}
+                match pkg_config::Config::new().cargo_metadata(false).probe(pc) {
+                    Ok(lib) => {
+                        for p in lib.link_paths {
+                            println!("cargo:rustc-link-search=native={}", p.display());
+                        }
+                        for lib in fallback {
+                            println!("cargo:rustc-link-lib=static={lib}");
+                        }
+                    }
                     Err(e) => {
                         println!("cargo:warning=pkg-config: {e}; falling back to bare -l link");
                         for lib in fallback {
@@ -180,19 +187,13 @@ fn link_platform_deps(os: TargetOs) {
                     }
                 }
             }
-            for lib in ["pthread", "m"] {
+            for lib in ["pthread", "m", "z"] {
                 println!("cargo:rustc-link-lib=dylib={lib}");
             }
-        }
-        TargetOs::MacOS => {
-            for lib in COMMON_DEPS {
-                println!("cargo:rustc-link-lib=static={lib}");
+            if os == TargetOs::MacOS {
+                println!("cargo:rustc-link-lib=framework=CoreServices");
+                println!("cargo:rustc-link-lib=framework=SystemConfiguration");
             }
-            for lib in ["m", "z"] {
-                println!("cargo:rustc-link-lib=dylib={lib}");
-            }
-            println!("cargo:rustc-link-lib=framework=CoreServices");
-            println!("cargo:rustc-link-lib=framework=SystemConfiguration");
         }
     }
 }
