@@ -156,7 +156,35 @@ else
 fi
 log "submodules ready"
 
-# ---------- 2.5 Python venv for the nanopb generator (macOS only) ----------
+# ---------- 3. CMake flags: lib-only static build ----------
+CMAKE_FLAGS="-G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
+	-DCHIAKI_ENABLE_GUI=OFF \
+	-DCHIAKI_ENABLE_CLI=OFF \
+	-DCHIAKI_ENABLE_TESTS=OFF \
+	-DCHIAKI_ENABLE_SETSU=OFF \
+	-DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF \
+	-DCHIAKI_ENABLE_STEAM_SHORTCUT=OFF \
+	-DCHIAKI_ENABLE_SPEEX=OFF \
+	-DCHIAKI_ENABLE_FFMPEG_DECODER=OFF"
+
+# curl is used by chiaki purely over HTTP/1.1 + WebSocket (holepunch.c).
+# Disable every curl feature that would add an external library dependency;
+# protocol-only disables are deliberately left out so that a user-built
+# libchiaki stays compatible with minimal configuration:
+#  - USE_NGHTTP2=OFF        libnghttp2 (chiaki has no HTTP/2 usage)
+#  - CURL_USE_LIBSSH2=OFF   libssh2
+#  - USE_LIBIDN2=OFF        libidn2 + libunistring + libiconv (curl's
+#                           internal idn stub, idn.c.obj, takes over)
+#  - CURL_USE_LIBPSL=OFF    libpsl (the cookie engine is off anyway)
+#  - CURL_BROTLI/ZSTD/GSSAPI/LIBSSH/RTMP=OFF  optional pickups that cmake
+#                           auto-enables when the libs are installed; they
+#                           must never silently enter the dependency closure.
+CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF -DCURL_USE_LIBSSH2=OFF \
+	-DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF \
+	-DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_LIBRTMP=OFF \
+	-DCURL_USE_GSSAPI=OFF -DCURL_USE_LIBSSH=OFF"
+
+# ---------- 4. Python venv for the nanopb generator (macOS only) ----------
 # Homebrew's Python is PEP 668 externally-managed and refuses bare pip
 # installs, so the nanopb generator deps go into a venv. Linux/MSYS2 use
 # the system python-protobuf package installed in step 1 and skip this.
@@ -205,34 +233,7 @@ if [ "$OS" = "Darwin" ]; then
 		-DPython3_EXECUTABLE=$PYTHON_VENV_DIR/bin/python3"
 fi
 
-# ---------- 3. configure + build (lib only, static) ----------
-CMAKE_FLAGS="-G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
-	-DCHIAKI_ENABLE_GUI=OFF \
-	-DCHIAKI_ENABLE_CLI=OFF \
-	-DCHIAKI_ENABLE_TESTS=OFF \
-	-DCHIAKI_ENABLE_SETSU=OFF \
-	-DCHIAKI_ENABLE_STEAMDECK_NATIVE=OFF \
-	-DCHIAKI_ENABLE_STEAM_SHORTCUT=OFF \
-	-DCHIAKI_ENABLE_SPEEX=OFF \
-	-DCHIAKI_ENABLE_FFMPEG_DECODER=OFF"
-
-# curl is used by chiaki purely over HTTP/1.1 + WebSocket (holepunch.c).
-# Disable every curl feature that would add an external library dependency;
-# protocol-only disables are deliberately left out so that a user-built
-# libchiaki stays compatible with minimal configuration:
-#  - USE_NGHTTP2=OFF        libnghttp2 (chiaki has no HTTP/2 usage)
-#  - CURL_USE_LIBSSH2=OFF   libssh2
-#  - USE_LIBIDN2=OFF        libidn2 + libunistring + libiconv (curl's
-#                           internal idn stub, idn.c.obj, takes over)
-#  - CURL_USE_LIBPSL=OFF    libpsl (the cookie engine is off anyway)
-#  - CURL_BROTLI/ZSTD/GSSAPI/LIBSSH/RTMP=OFF  optional pickups that cmake
-#                           auto-enables when the libs are installed; they
-#                           must never silently enter the dependency closure.
-CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF -DCURL_USE_LIBSSH2=OFF \
-	-DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF \
-	-DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_LIBRTMP=OFF \
-	-DCURL_USE_GSSAPI=OFF -DCURL_USE_LIBSSH=OFF"
-
+# ---------- 5. configure + build ----------
 # STATIC SWITCH: MINIUPNP_STATICLIB is the only STATIC macro the stack needs.
 # miniupnpc_declspec.h forces __declspec(dllimport) on _WIN32 unless it is
 # defined, which pins a runtime libminiupnpc.dll dependency; defining it makes
@@ -244,7 +245,7 @@ export CFLAGS="${CFLAGS:-} -ffunction-sections -fdata-sections -DMINIUPNP_STATIC
 cmake -S "$SRC" -B "$BUILD_DIR" $CMAKE_FLAGS
 cmake --build "$BUILD_DIR" --target chiaki-lib -j "$JOBS"
 
-# ---------- 4. collect into $PREFIX ----------
+# ---------- 6. collect into $PREFIX ----------
 log "collecting into $PREFIX"
 rm -rf "$PREFIX/include/chiaki"
 rm -f "$PREFIX/lib/libchiaki.a" "$PREFIX/lib/libcurl.a" \
@@ -269,7 +270,7 @@ cp "$BUILD_DIR/lib/libchiaki.a" \
 	"$BUILD_DIR/third-party/nanopb/libprotobuf-nanopb.a" \
 	"$PREFIX/lib/"
 
-# ---------- 5. verify ----------
+# ---------- 7. verify ----------
 NM="$(command -v nm || command -v llvm-nm || true)"
 if [ -z "$NM" ]; then
 	log "WARNING: nm not found, skipping symbol check"
