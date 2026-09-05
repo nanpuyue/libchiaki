@@ -3,6 +3,7 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::ffi::CString;
 use std::marker::PhantomData;
+use std::mem::{align_of, size_of};
 use std::os::raw::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -254,12 +255,10 @@ pub struct Session<'a> {
 // 不同时存在共享引用, 回调经 Mutex 保护且要求 Send。
 unsafe impl Send for Session<'_> {}
 
-use crate::shim;
-
 impl<'a> Session<'a> {
     pub fn new(info: ConnectInfo, log: &'a Log) -> Result<Self, Error> {
-        let size = unsafe { shim::libchiaki_sizeof_ChiakiSession() };
-        let align = unsafe { shim::libchiaki_alignof_ChiakiSession() };
+        let size = size_of::<ffi::ChiakiSession>();
+        let align = align_of::<ffi::ChiakiSession>();
         let layout = Layout::from_size_align(size, align)
             .map_err(|_| Error(ffi::ChiakiErrorCode::CHIAKI_ERR_UNKNOWN))?;
         let ptr = unsafe { alloc(layout) as *mut ffi::ChiakiSession };
@@ -362,7 +361,7 @@ impl<'a> Session<'a> {
     {
         let holder = ErasedCallback::new(f);
         unsafe {
-            shim::libchiaki_session_set_event_cb(
+            ffi::chiaki_session_set_event_cb(
                 self.ptr,
                 Some(event_trampoline::<F>),
                 holder.ptr,
@@ -378,7 +377,7 @@ impl<'a> Session<'a> {
     {
         let holder = ErasedCallback::new(f);
         unsafe {
-            shim::libchiaki_session_set_video_sample_cb(
+            ffi::chiaki_session_set_video_sample_cb(
                 self.ptr,
                 Some(video_trampoline::<F>),
                 holder.ptr,
@@ -387,7 +386,7 @@ impl<'a> Session<'a> {
         self._video_cb = Some(holder);
     }
 
-    /// 通过垫片写入 session->audio_sink (C 侧拷贝结构体)。
+    /// 写入 session->audio_sink (C 侧拷贝结构体)。
     pub fn set_audio_sink<H, F>(&mut self, header_cb: H, frame_cb: F)
     where
         H: FnMut(&mut AudioHeader) + Send + 'static,
@@ -397,12 +396,12 @@ impl<'a> Session<'a> {
             header_cb,
             frame_cb,
         });
-        let sink = ffi::ChiakiAudioSink {
+        let mut sink = ffi::ChiakiAudioSink {
             user: holder.ptr,
             header_cb: Some(audio_sink_header_trampoline::<H, F>),
             frame_cb: Some(audio_sink_frame_trampoline::<H, F>),
         };
-        unsafe { shim::libchiaki_session_set_audio_sink(self.ptr, &sink) };
+        unsafe { ffi::chiaki_session_set_audio_sink(self.ptr, &mut sink) };
         self._audio_sink = Some(holder);
     }
 
@@ -415,12 +414,12 @@ impl<'a> Session<'a> {
             header_cb,
             frame_cb,
         });
-        let sink = ffi::ChiakiAudioSink {
+        let mut sink = ffi::ChiakiAudioSink {
             user: holder.ptr,
             header_cb: Some(audio_sink_header_trampoline::<H, F>),
             frame_cb: Some(audio_sink_frame_trampoline::<H, F>),
         };
-        unsafe { shim::libchiaki_session_set_haptics_sink(self.ptr, &sink) };
+        unsafe { ffi::chiaki_session_set_haptics_sink(self.ptr, &mut sink) };
         self._haptics_sink = Some(holder);
     }
 
@@ -429,11 +428,11 @@ impl<'a> Session<'a> {
         F: FnMut(bool) + Send + 'static,
     {
         let holder = ErasedCallback::new(f);
-        let sink = ffi::ChiakiCtrlDisplaySink {
+        let mut sink = ffi::ChiakiCtrlDisplaySink {
             user: holder.ptr,
             cantdisplay_cb: Some(display_sink_trampoline::<F>),
         };
-        unsafe { shim::libchiaki_session_set_display_sink(self.ptr, &sink) };
+        unsafe { ffi::chiaki_session_ctrl_set_display_sink(self.ptr, &mut sink) };
         self._display_sink = Some(holder);
     }
 }

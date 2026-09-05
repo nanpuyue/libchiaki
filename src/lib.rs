@@ -1,11 +1,12 @@
 //! Safe Rust bindings for `libchiaki` (the core library of chiaki-ng).
 //!
-//! 布局说明: 底层的 [`ffi`] 模块由 bindgen 从 C 头文件生成, 链接
-//! `LIBCHIAKI_PREFIX` 指向的预编译静态库 (见 scripts/build-chiaki.sh)。
-//! 各子模块在此之上提供 RAII 封装与闭包回调。内部实现细节结构体
-//! (Session / Takion / Mutex 等) 的 bindgen 布局不可靠,
-//! 因此大对象的分配与字段设置走 C 垫片 (shim/chiaki_shim.c),
-//! Rust 侧只持有指针, 绝不直接实例化它们。
+//! 布局说明: 底层的 [`ffi`] 模块由 bindgen 从 `LIBCHIAKI_PREFIX` 指向的
+//! 安装头文件生成 (见 scripts/build-chiaki.sh), 链接其预编译静态库。
+//! 所有类型布局直接取自 bindgen 对真实头文件的解析; chiaki 头文件里的
+//! `static inline` 辅助函数由 bindgen 的 wrap_static_fns 生成 C 包装并
+//! 在构建期编译 (build.rs)。若 bindgen 因前向声明把某个类型降级成
+//! opaque 占位, 构建会直接失败 (build.rs 的 opaque 检查),
+//! `cargo test` 还会运行 bindgen 生成的逐类型布局测试。
 //!
 //! Windows 上必须用 GNU target 构建:
 //! `cargo build --target x86_64-pc-windows-gnu` (见 build.rs 的 panic 提示)。
@@ -14,7 +15,6 @@
 
 pub mod ffi;
 
-mod shim;
 mod util;
 
 pub mod common;
@@ -27,9 +27,6 @@ pub mod holepunch;
 pub mod log;
 pub mod regist;
 pub mod session;
-
-#[cfg(test)]
-mod tests;
 
 // 根导出保持扁平, 与拆分前一致。
 pub use common::*;

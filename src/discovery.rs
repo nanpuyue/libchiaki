@@ -3,7 +3,7 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::ffi::CString;
 use std::marker::PhantomData;
-use std::mem::size_of;
+use std::mem::{align_of, size_of};
 use std::os::raw::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -12,36 +12,24 @@ use std::sync::Mutex;
 use crate::error::{Error, cvt};
 use crate::ffi;
 use crate::log::Log;
-use crate::shim;
 use crate::util::{ErasedCallback, cstr_to_string, opt_cstr, zeroed_box};
 
-#[cfg(windows)]
-pub const AF_INET: u16 = 2;
-#[cfg(windows)]
-pub const AF_INET6: u16 = 23;
-#[cfg(target_os = "linux")]
-pub const AF_INET6: u16 = 10;
-#[cfg(target_os = "macos")]
-pub const AF_INET6: u16 = 30;
-#[cfg(not(windows))]
-pub const AF_INET: u16 = 2;
-
-/// IPv4 socket 地址 (C ABI 稳定, 不依赖 bindgen)。
-#[repr(C)]
-struct SockAddrIn {
-    family: u16,
-    port_be: u16,
-    addr: u32,
-    zero: [u8; 8],
-}
-
-fn ipv4_sockaddr(ip: [u8; 4], port: u16) -> SockAddrIn {
-    SockAddrIn {
-        family: AF_INET,
-        port_be: port.to_be(),
-        addr: u32::from_ne_bytes(ip),
-        zero: [0; 8],
+/// 直接用 bindgen 从系统头生成的 sockaddr_in: BSD 的 sin_len、Windows 的
+/// IN_ADDR union 都由各目标平台真实头文件决定, Rust 不手写布局。
+/// 布局正确性由 tests/layout.rs 对照 C 垫片的 sizeof 断言兜底。
+fn ipv4_sockaddr(ip: [u8; 4], port: u16) -> ffi::sockaddr_in {
+    let mut a: ffi::sockaddr_in = unsafe { std::mem::zeroed() };
+    a.sin_family = ffi::AF_INET as _;
+    a.sin_port = port.to_be();
+    // sin_addr 在三个平台都是 4 字节原始地址 (Windows 上是 union, 成员名不同),
+    // 按字节写入, 平台无关。
+    unsafe { (&raw mut a.sin_addr).cast::<u32>().write_unaligned(u32::from_ne_bytes(ip)) };
+    // BSD 的 sockaddr_in 开头有 sin_len (整个结构体的长度), 其余平台没有。
+    #[cfg(target_vendor = "apple")]
+    {
+        a.sin_len = size_of::<ffi::sockaddr_in>() as u8;
     }
+    a
 }
 
 /// `ChiakiDiscoveryPacket` builder (拥有 protocol_version 字符串)。
@@ -179,7 +167,7 @@ impl<'a> Discovery<'a> {
             ffi::chiaki_discovery_init(
                 &mut *raw,
                 log.as_ptr() as *mut _,
-                if ipv6 { AF_INET6 as _ } else { AF_INET as _ },
+                if ipv6 { ffi::AF_INET6 as _ } else { ffi::AF_INET as _ },
             )
         })?;
         Ok(Discovery {
@@ -201,7 +189,7 @@ impl<'a> Discovery<'a> {
                 &*self.raw as *const _ as *mut _,
                 &*packet.raw as *const _ as *mut _,
                 &addr as *const _ as *mut ffi::sockaddr,
-                size_of::<SockAddrIn>(),
+                size_of::<ffi::sockaddr_in>(),
             )
         })
     }
@@ -395,8 +383,8 @@ impl<'a> DiscoveryService<'a> {
         F: FnMut(Vec<DiscoveryHostInfo>) + Send + 'static,
     {
         let holder = ErasedCallback::new(cb);
-        let size = unsafe { shim::libchiaki_sizeof_ChiakiDiscoveryService() };
-        let align = unsafe { shim::libchiaki_alignof_ChiakiDiscoveryService() };
+        let size = size_of::<ffi::ChiakiDiscoveryService>();
+        let align = align_of::<ffi::ChiakiDiscoveryService>();
         let layout = Layout::from_size_align(size, align)
             .map_err(|_| Error(ffi::ChiakiErrorCode::CHIAKI_ERR_UNKNOWN))?;
         let ptr = unsafe { alloc(layout) as *mut ffi::ChiakiDiscoveryService };

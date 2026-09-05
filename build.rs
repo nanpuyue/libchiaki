@@ -130,30 +130,55 @@ fn main() {
     if is_windows {
         ensure_libclang();
     }
-    let bindings = build_bindings(&include_dir);
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
-    bindings
-        .write_to_file(out.join("bindings.rs"))
-        .expect("failed to write bindings");
+    let bindings = build_bindings(&include_dir, &out);
 
-    compile_shim(&include_dir, &out);
-}
+    // bindgen 的已知失败模式: 类型在翻译单元里第一次出现是前向声明时,
+    // 会生成 _bindgen_opaque_blob 占位并毒化所有按值包含它的布局。
+    // 与其让这种错误静默地进入运行时, 不如在构建期直接失败。
+    let code = bindings.to_string();
+    let poisoned = find_opaque_types(&code);
+    assert!(
+        poisoned.is_empty(),
+        "bindgen emitted opaque placeholders for (layout untrusted):\n  {}",
+        poisoned.join("\n  ")
+    );
+    std::fs::write(out.join("bindings.rs"), code).expect("failed to write bindings");
 
-/// Compile the C shim in shim/ against the REAL installed headers with the
-/// REAL C compiler. It exports sizeof/_Alignof for every struct the safe
-/// wrappers allocate or interpret, plus setters mirroring chiaki's
-/// `static inline` helpers (which are not exported by the static lib).
-/// Rust never relies on bindgen's layout for these types.
-fn compile_shim(include_dir: &std::path::Path, _out: &std::path::Path) {
-    println!("cargo:rerun-if-changed=shim/chiaki_shim.c");
-    let manifest =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
+    // wrap_static_fns 生成的 C 包装: chiaki 头文件里的 `static inline`
+    // 辅助函数在 libchiaki.a 里没有符号, bindgen 也生成不了函数体,
+    // 这里把 bindgen 写出的包装 C 文件用真实 C 编译器编译成符号。
     cc::Build::new()
-        .file(manifest.join("shim").join("chiaki_shim.c"))
+        .file(out.join("__bindgen.c"))
         .include(include_dir)
         .opt_level(2)
         .warnings(false)
-        .compile("chiaki_shim");
+        .compile("bindgen_wrappers");
+}
+
+/// 扫描生成的绑定, 返回被写成 `_bindgen_opaque_blob` 占位的类型名。
+fn find_opaque_types(code: &str) -> Vec<String> {
+    let mut bad = Vec::new();
+    let mut cur = String::new();
+    for line in code.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("pub struct ") {
+            cur = rest
+                .split(['<', ' ', '{', ';'])
+                .next()
+                .unwrap_or_default()
+                .to_string();
+        } else if let Some(rest) = t.strip_prefix("pub union ") {
+            cur = rest
+                .split(['<', ' ', '{', ';'])
+                .next()
+                .unwrap_or_default()
+                .to_string();
+        } else if t.contains("_bindgen_opaque_blob") && !cur.is_empty() {
+            bad.push(std::mem::take(&mut cur));
+        }
+    }
+    bad
 }
 
 /// Locate <mingw64>/lib. Never hardcoded to a single drive:
@@ -229,7 +254,7 @@ fn ensure_libclang() {
 }
 
 /// Run bindgen over every installed chiaki header.
-fn build_bindings(include_dir: &std::path::Path) -> bindgen::Bindings {
+fn build_bindings(include_dir: &std::path::Path, out: &std::path::Path) -> bindgen::Bindings {
     let chiaki_inc = include_dir.join("chiaki");
     let mut headers: Vec<String> = Vec::new();
     let mut top: Vec<_> = std::fs::read_dir(&chiaki_inc)
@@ -264,20 +289,19 @@ fn build_bindings(include_dir: &std::path::Path) -> bindgen::Bindings {
              sockaddr_in|SOCKADDR_IN|in_addr|IN_ADDR|\
              in6_addr|IN6_ADDR|ADDRESS_FAMILY|SOCKET",
         )
+        // AF_INET/AF_INET6 are macros in the system socket headers with
+        // per-OS values (winsock 23 / Linux 10 / BSD 30); take them from the
+        // real headers of each target instead of hand-maintaining the table.
+        .allowlist_var("AF_INET.*")
         .default_enum_style(bindgen::EnumVariation::Rust {
             non_exhaustive: false,
         })
         .derive_default(true)
         .generate_comments(false)
-        // NOTE: layout tests are intentionally OFF. bindgen 0.71 emits
-        // opaque placeholders for structs whose first encounter in the TU
-        // is a forward reference (ChiakiSession via streamconnection.h,
-        // ChiakiTakion, RudpMessage, _RTL_CRITICAL_SECTION via its DEBUG
-        // struct, nanopb internals, ...), which poisons every layout
-        // containing them. Layout correctness is instead guaranteed by
-        // the C shim below (real sizeof/_Alignof) plus runtime size
-        // assertions in src/lib.rs tests. See compile_shim().
-        .layout_tests(false)
+        // 布局测试随绑定生成 (bindgen 默认开启), cargo test 时逐类型核对。
+        // static inline 辅助函数: 生成 C 包装文件 (见 main 末尾的 cc 编译)。
+        .wrap_static_fns(true)
+        .wrap_static_fns_path(path_str(out.join("__bindgen.c")))
         .generate()
         .expect("bindgen failed")
 }
