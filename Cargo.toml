@@ -6,5 +6,5 @@ description = "Safe Rust bindings for libchiaki (chiaki-ng's core library)"
 authors = ["南浦月 <nanpuyue@gmail.com>"]
 
 [build-dependencies]
-bindgen = "0.71"
+bindgen = "0.72"
 cc = "1"

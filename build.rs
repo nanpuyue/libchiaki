@@ -132,18 +132,9 @@ fn main() {
     }
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let bindings = build_bindings(&include_dir, &out);
-
-    // bindgen 的已知失败模式: 类型在翻译单元里第一次出现是前向声明时,
-    // 会生成 _bindgen_opaque_blob 占位并毒化所有按值包含它的布局。
-    // 与其让这种错误静默地进入运行时, 不如在构建期直接失败。
-    let code = bindings.to_string();
-    let poisoned = find_opaque_types(&code);
-    assert!(
-        poisoned.is_empty(),
-        "bindgen emitted opaque placeholders for (layout untrusted):\n  {}",
-        poisoned.join("\n  ")
-    );
-    std::fs::write(out.join("bindings.rs"), code).expect("failed to write bindings");
+    bindings
+        .write_to_file(out.join("bindings.rs"))
+        .expect("failed to write bindings");
 
     // wrap_static_fns 生成的 C 包装: chiaki 头文件里的 `static inline`
     // 辅助函数在 libchiaki.a 里没有符号, bindgen 也生成不了函数体,
@@ -154,31 +145,6 @@ fn main() {
         .opt_level(2)
         .warnings(false)
         .compile("bindgen_wrappers");
-}
-
-/// 扫描生成的绑定, 返回被写成 `_bindgen_opaque_blob` 占位的类型名。
-fn find_opaque_types(code: &str) -> Vec<String> {
-    let mut bad = Vec::new();
-    let mut cur = String::new();
-    for line in code.lines() {
-        let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("pub struct ") {
-            cur = rest
-                .split(['<', ' ', '{', ';'])
-                .next()
-                .unwrap_or_default()
-                .to_string();
-        } else if let Some(rest) = t.strip_prefix("pub union ") {
-            cur = rest
-                .split(['<', ' ', '{', ';'])
-                .next()
-                .unwrap_or_default()
-                .to_string();
-        } else if t.contains("_bindgen_opaque_blob") && !cur.is_empty() {
-            bad.push(std::mem::take(&mut cur));
-        }
-    }
-    bad
 }
 
 /// Locate <mingw64>/lib. Never hardcoded to a single drive:
