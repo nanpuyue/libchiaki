@@ -150,19 +150,20 @@ fn link_platform_deps(os: TargetOs) {
             for lib in COMMON_DEPS {
                 println!("cargo:rustc-link-lib=static={lib}");
             }
-            // Third-party static curl's own deps (ssh2/psl/idn2/nghttp2/z
-            // are what curl was configured with).
-            for lib in ["ssh2", "psl", "idn2", "unistring", "iconv", "z"] {
-                println!("cargo:rustc-link-lib=static={lib}");
-            }
-            // Matches chiaki's own CMake (wsock32 ws2_32 bcrypt iphlpapi) plus
-            // what the static Schannel curl / OpenSSL ssh2 / OpenSSL need
-            // (crypt32, advapi32, userenv, shell32, ole32). These are OS libs in
-            // the mingw CRT import libs, so plain (non-static) link is correct.
-            for lib in [
-                "ws2_32", "wsock32", "crypt32", "bcrypt", "iphlpapi", "advapi32", "userenv",
-                "shell32", "ole32",
-            ] {
+            // Third-party static curl's remaining deps. The optional ones
+            // (ssh2/psl/idn2/unistring/iconv/brotli/zstd) are disabled in
+            // scripts/build-chiaki.sh, so libcurl.a references none of them
+            // (nm-verified); only zlib survives.
+            println!("cargo:rustc-link-lib=static=z");
+            // OS libs the chiaki stack itself needs: ws2_32 (Winsock:
+            // WSAStartup/WSAIoctl), bcrypt (BCryptGenRandom) and advapi32
+            // (CryptAcquireContextW rand fallback + event logging + the
+            // Windows cert-store CA lookup, all in libcrypto), iphlpapi
+            // (GetAdaptersInfo in holepunch.c) — chiaki's own CMake minus
+            // wsock32, which nothing references (import-table verified).
+            // userenv/shell32/ole32 have zero references in this closure;
+            // Rust std supplies its own.
+            for lib in ["ws2_32", "bcrypt", "advapi32", "crypt32", "iphlpapi"] {
                 println!("cargo:rustc-link-lib={lib}");
             }
         }
@@ -172,7 +173,7 @@ fn link_platform_deps(os: TargetOs) {
                     // pkg_config 自己打印 link-lib/link-search 元数据。
                     Ok(_) => {}
                     Err(e) => {
-                        println!("cargo:warning=pkg-config: {e}; 退回裸 -l 链接");
+                        println!("cargo:warning=pkg-config: {e}; falling back to bare -l link");
                         for lib in fallback {
                             println!("cargo:rustc-link-lib=dylib={lib}");
                         }

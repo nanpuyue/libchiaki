@@ -157,8 +157,9 @@ fi
 log "submodules ready"
 
 # ---------- 2.5 Python venv for the nanopb generator (macOS only) ----------
-# Homebrew Python is PEP 668 externally-managed and refuses plain pip install;
-# Linux/MSYS2 get python-protobuf from the system packages installed above.
+# Homebrew's Python is PEP 668 externally-managed and refuses bare pip
+# installs, so the nanopb generator deps go into a venv. Linux/MSYS2 use
+# the system python-protobuf package installed in step 1 and skip this.
 if [ "$OS" = "Darwin" ]; then
 	PY3="$(command -v python3 || true)"
 	[ -n "$PY3" ] || { echo "python3 not found" >&2; exit 1; }
@@ -214,23 +215,30 @@ CMAKE_FLAGS="-G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
 	-DCHIAKI_ENABLE_STEAM_SHORTCUT=OFF \
 	-DCHIAKI_ENABLE_SPEEX=OFF \
 	-DCHIAKI_ENABLE_FFMPEG_DECODER=OFF"
-	
-# curl is used by chiaki purely over HTTP/1.1 (no CURLOPT_HTTP_VERSION=2
-# anywhere in lib/); force the bundled curl off nghttp2/HTTP2 so it neither
-# pulls a libnghttp2 dependency nor carries dead http2 code into the static
-# lib. Disabling it has no functional impact on remote play.
-CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF -DCURL_USE_LIBSSH2=OFF -DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF"
 
-# STATIC SWITCH: this is the only STATIC macro the whole stack actually needs.
-# nm on the produced libchiaki.a confirms the only third-party __imp_ (DLL
-# import) references come from miniupnpc: miniupnpc_declspec.h forces
-# __declspec(dllimport) on _WIN32 unless MINIUPNP_STATICLIB is defined, which
-# pins a runtime libminiupnpc.dll dependency that gc-sections cannot drop.
-# Defining it makes holepunch.c reference the plain `upnpDiscover` symbol that
-# MSYS2's static libminiupnpc.a provides. https2 (nghttp2), curl, libevent,
-# openssl, opus, json-c, idn2 .etc. do NOT emit any __imp_ here (verified by
-# nm), so no per-library macros are needed and USE_NGHTTP2=OFF already removed
-# nghttp2 entirely.
+# curl is used by chiaki purely over HTTP/1.1 + WebSocket (holepunch.c).
+# Disable every curl feature that would add an external library dependency;
+# protocol-only disables are deliberately left out so that a user-built
+# libchiaki stays compatible with minimal configuration:
+#  - USE_NGHTTP2=OFF        libnghttp2 (chiaki has no HTTP/2 usage)
+#  - CURL_USE_LIBSSH2=OFF   libssh2
+#  - USE_LIBIDN2=OFF        libidn2 + libunistring + libiconv (curl's
+#                           internal idn stub, idn.c.obj, takes over)
+#  - CURL_USE_LIBPSL=OFF    libpsl (the cookie engine is off anyway)
+#  - CURL_BROTLI/ZSTD/GSSAPI/LIBSSH/RTMP=OFF  optional pickups that cmake
+#                           auto-enables when the libs are installed; they
+#                           must never silently enter the dependency closure.
+CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF -DCURL_USE_LIBSSH2=OFF \
+	-DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF \
+	-DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_LIBRTMP=OFF \
+	-DCURL_USE_GSSAPI=OFF -DCURL_USE_LIBSSH=OFF"
+
+# STATIC SWITCH: MINIUPNP_STATICLIB is the only STATIC macro the stack needs.
+# miniupnpc_declspec.h forces __declspec(dllimport) on _WIN32 unless it is
+# defined, which pins a runtime libminiupnpc.dll dependency; defining it makes
+# holepunch.c use the plain `upnpDiscover` symbol from the static lib. No other
+# library in the stack emits __imp_ references (nm-verified), so no other
+# per-library macros are needed.
 export CFLAGS="${CFLAGS:-} -ffunction-sections -fdata-sections -DMINIUPNP_STATICLIB"
 # shellcheck disable=SC2086
 cmake -S "$SRC" -B "$BUILD_DIR" $CMAKE_FLAGS
