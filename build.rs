@@ -11,9 +11,11 @@ const STATIC_LIBS: &[&str] = &[
     "protobuf-nanopb",
 ];
 
-// Linux/macOS: 系统包管理器的依赖, 库名/版本随发行版变化, 交由 pkg-config
-// 定位并自动补齐搜索路径。探测失败时退回裸 -l (裸名见第二列),
-// 兼容没有 .pc 文件的环境。
+// 三平台共用的外部依赖: (pkg-config 名, 库名)。Windows 直接取裸名
+// static=; Linux/macOS 走 pkg-config 探测 (见 link_platform_deps)。
+// pthread/m 不在清单: rustc/std 自行链接 (glibc 2.34 起并入 libc, musl
+// 无独立的 libpthread/libm, 显式链反而破坏全静态); z 是静态 libcurl.a 的
+// 真实依赖, 与其余库一视同仁。
 const PKG_DEPS: &[(&str, &[&str])] = &[
     ("openssl", &["ssl", "crypto"]),
     ("opus", &["opus"]),
@@ -38,6 +40,11 @@ fn main() {
     // clang-sys 在所有平台都读它来定位 libclang (Windows 分支的
     // ensure_libclang 只是在未设置时自动填充一份合适的默认值)。
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
+    // LIBCHIAKI_STATIC_LIBS 只影响 Linux/macOS 分支的链接策略, Windows
+    // 不读取也不监听它。
+    if os == TargetOs::Linux || os == TargetOs::MacOS {
+        println!("cargo:rerun-if-env-changed=LIBCHIAKI_STATIC_LIBS");
+    }
     if os == TargetOs::Windows {
         // 这两个只影响 Windows 的 mingw sysroot 探测, 其余平台读它们
         // 没有意义, 不声明以免无谓的重新构建。
@@ -165,30 +172,80 @@ fn link_platform_deps(os: TargetOs) {
             }
         }
         TargetOs::Linux | TargetOs::MacOS => {
-            // pkg-config 定位依赖库的搜索路径 (Homebrew 的 /opt/homebrew/lib
-            // 不在 macOS 链接器默认搜索路径里, 没有 pkg-config 就得靠使用者
-            // 手工设置 RUSTFLAGS=-L)。cargo_metadata=false: 只要路径, 链接
-            // 方式由我们自己发, 保持 static= 语义 (与 Windows 分支一致)。
-            for &(pc, fallback) in PKG_DEPS {
-                match pkg_config::Config::new().cargo_metadata(false).probe(pc) {
+            // 静态/动态策略, LIBCHIAKI_STATIC_LIBS -> static_list:
+            //   未设置 -> None, 优先静态: 在 pkg-config 返回的路径里确认
+            //            lib<name>.a 才 static= (macOS 的 static= 不保证
+            //            静态, SDK 的 .tbd 桩会静默落到动态库); 没确认到
+            //            .a 就发裸 -l, 由链接器默认顺序决定 (先动态后静态)
+            //   "all"  -> 全部库名 (无条件全静态, musl 全静态场景)
+            //   "none" -> 空名单 (全动态)
+            //   名单   -> 逗号分隔库名, 名单内 static= 其余 dylib=;
+            //            名单外的库名忽略并警告
+            let static_env = env::var("LIBCHIAKI_STATIC_LIBS").ok();
+            let static_list: Option<Vec<&str>> =
+                static_env.as_deref().map(|v| match v.trim() {
+                "all" => PKG_DEPS
+                    .iter()
+                    .flat_map(|(_, l)| l.iter().copied())
+                    .collect(),
+                "none" => Vec::new(),
+                v => {
+                    let mut list: Vec<&str> =
+                        v.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                    let unknown: Vec<&str> = list
+                        .iter()
+                        .copied()
+                        .filter(|n| !PKG_DEPS.iter().any(|(_, l)| l.contains(n)))
+                        .collect();
+                    if !unknown.is_empty() {
+                        println!(
+                            "cargo:warning=LIBCHIAKI_STATIC_LIBS: ignoring unknown libs: {}",
+                            unknown.join(", ")
+                        );
+                        list.retain(|n| PKG_DEPS.iter().any(|(_, l)| l.contains(n)));
+                    }
+                    list
+                }
+            });
+            for &(pc, libs) in PKG_DEPS {
+                // pkg-config 只负责定位搜索路径; 探测成功不代表有静态库。
+                let dirs = match pkg_config::Config::new().cargo_metadata(false).probe(pc) {
                     Ok(lib) => {
-                        for p in lib.link_paths {
+                        for p in &lib.link_paths {
                             println!("cargo:rustc-link-search=native={}", p.display());
                         }
-                        for lib in fallback {
-                            println!("cargo:rustc-link-lib=static={lib}");
-                        }
+                        Some(lib.link_paths)
                     }
                     Err(e) => {
-                        println!("cargo:warning=pkg-config: {e}; falling back to bare -l link");
-                        for lib in fallback {
-                            println!("cargo:rustc-link-lib=dylib={lib}");
+                        println!("cargo:warning=pkg-config: {e}");
+                        None
+                    }
+                };
+                for &name in libs {
+                    match &static_list {
+                        Some(list) => {
+                            if list.contains(&name) {
+                                println!("cargo:rustc-link-lib=static={name}");
+                            } else {
+                                println!("cargo:rustc-link-lib=dylib={name}");
+                            }
+                        }
+                        None => {
+                            match dirs
+                                .iter()
+                                .flatten()
+                                .find(|d| d.join(format!("lib{name}.a")).is_file())
+                            {
+                                // .a 确认存在才发 static= (目录已在上面随探测
+                                // 路径一起输出)。
+                                Some(_) => println!("cargo:rustc-link-lib=static={name}"),
+                                // 未确认: 发裸 -l, 交给链接器默认顺序 (先动态,
+                                // 找不到静态再退静态), 不替使用者下结论。
+                                None => println!("cargo:rustc-link-lib={name}"),
+                            }
                         }
                     }
                 }
-            }
-            for lib in ["pthread", "m", "z"] {
-                println!("cargo:rustc-link-lib=dylib={lib}");
             }
             if os == TargetOs::MacOS {
                 println!("cargo:rustc-link-lib=framework=CoreServices");
