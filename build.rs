@@ -39,12 +39,14 @@ fn main() {
     let os = target_os(&target);
 
     println!("cargo:rerun-if-env-changed=LIBCHIAKI_PREFIX");
+    // clang-sys 在所有平台都读它来定位 libclang (Windows 分支的
+    // ensure_libclang 只是在未设置时自动填充一份合适的默认值)。
+    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     if os == TargetOs::Windows {
-        // 这三个只影响 Windows 的 mingw sysroot / libclang 探测,
-        // 其余平台读它们没有意义, 不声明以免无谓的重新构建。
+        // 这两个只影响 Windows 的 mingw sysroot 探测, 其余平台读它们
+        // 没有意义, 不声明以免无谓的重新构建。
         println!("cargo:rerun-if-env-changed=MINGW_PREFIX");
         println!("cargo:rerun-if-env-changed=MSYS2_ROOT");
-        println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     }
 
     // --- link ---
