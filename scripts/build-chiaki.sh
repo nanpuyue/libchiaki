@@ -21,6 +21,30 @@
 #   JOBS                default nproc
 #   SKIP_DEPS=1         skip system package installation
 #
+#   --- Python venv for the nanopb generator (macOS only) ---
+#   chiaki-ng generates takion.pb.c/.pb.h at build time by running
+#   third-party/nanopb/generator/nanopb_generator.py, which is pure Python and
+#   needs google.protobuf. Homebrew Python is PEP 668 "externally managed",
+#   so pip refuses to install into it; we create a venv next to build-lib
+#   inside the (throwaway) source tree instead. Linux/MSYS2 ship
+#   python-protobuf as a system package, so they never get a venv.
+#   The venv is never cleaned up: it lives and dies with $CHIAKI_SRC_DIR, and
+#   a later run reuses it as-is.
+#
+#   PIP_MODULES         default "protobuf grpcio-tools" (unpinned; both track
+#                       latest). grpcio-tools ships its own protoc and nanopb
+#                       prefers it over the one on PATH, so leaving both
+#                       unpinned keeps protoc and python-protobuf in step with
+#                       each other by construction.
+#                       If it breaks on an older nanopb submodule, pin back:
+#                         PIP_MODULES='protobuf>=5,<6 grpcio-tools>=5,<6' \
+#                         PROTOBUF_FORMULA=protobuf@29 ./scripts/build-chiaki.sh
+#                       Drop grpcio-tools to force nanopb onto brew's protoc.
+#   PROTOBUF_FORMULA    brew formula providing protoc, default "protobuf"
+#                       (currently 35.x, pairs with python-protobuf 6.x).
+#                       Set to "protobuf@29" for upstream CI's pinned combo,
+#                       which also needs PIP_MODULES pinned to 5.x.
+#
 # Example (MSYS2 MINGW64 shell):
 #   export LIBCHIAKI_PREFIX=/e/build/libchiaki-install
 #   ./scripts/build-chiaki.sh
@@ -33,6 +57,9 @@ CHIAKI_SRC_DIR="${CHIAKI_SRC_DIR:-$(pwd)/chiaki-ng-src}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 SKIP_DEPS="${SKIP_DEPS:-0}"
+
+PIP_MODULES="${PIP_MODULES:-protobuf grpcio-tools}"
+PROTOBUF_FORMULA="${PROTOBUF_FORMULA:-protobuf}"
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 	sed -n '2,/^set /p' "$0"
@@ -51,6 +78,9 @@ normpath() {
 PREFIX="$(normpath "$LIBCHIAKI_PREFIX")"
 SRC="$(normpath "$CHIAKI_SRC_DIR")"
 BUILD_DIR="$SRC/build-lib"
+# venv for the nanopb generator; sits next to build-lib inside the throwaway
+# source tree, so it is discarded together with $SRC and reused across runs.
+PYTHON_VENV_DIR="$SRC/build-nanopb-venv"
 OS="$(uname -s)"
 
 log() { echo "[build-chiaki] $*"; }
@@ -89,7 +119,7 @@ if [ "$SKIP_DEPS" != "1" ]; then
 				exit 1
 			}
 			brew install git cmake ninja pkg-config \
-				openssl opus json-c libevent miniupnpc protobuf python
+				openssl opus json-c libevent miniupnpc "$PROTOBUF_FORMULA" python
 			;;
 		*)
 			echo "unsupported OS: $OS" >&2
@@ -126,6 +156,54 @@ else
 fi
 log "submodules ready"
 
+# ---------- 2.5 Python venv for the nanopb generator (macOS only) ----------
+# Homebrew Python is PEP 668 externally-managed and refuses plain pip install;
+# Linux/MSYS2 get python-protobuf from the system packages installed above.
+if [ "$OS" = "Darwin" ]; then
+	PY3="$(command -v python3 || true)"
+	[ -n "$PY3" ] || { echo "python3 not found" >&2; exit 1; }
+
+	if [ -x "$PYTHON_VENV_DIR/bin/python3" ]; then
+		log "reusing venv: $PYTHON_VENV_DIR"
+	else
+		log "creating venv: $PYTHON_VENV_DIR"
+		"$PY3" -m venv "$PYTHON_VENV_DIR"
+	fi
+
+	# Word-split on purpose, but `>=5,<6` must never reach the shell as a
+	# redirect, so go through an array instead of a bare $PIP_MODULES.
+	read -r -a PIP_MODULE_ARRAY <<<"$PIP_MODULES"
+	log "installing into venv: ${PIP_MODULES}"
+	# pip install is idempotent and fast when requirements are already met, so
+	# just run it unconditionally rather than tracking state ourselves.
+	"$PYTHON_VENV_DIR/bin/python3" -m pip install --quiet --disable-pip-version-check \
+		"${PIP_MODULE_ARRAY[@]}"
+
+	# Show what nanopb will actually pick up: which protoc, which
+	# python-protobuf. This is the one command that catches version mismatches
+	# before a full build. Keep an eye on the two version lines.
+	"$PYTHON_VENV_DIR/bin/python3" \
+		"$SRC/third-party/nanopb/generator/nanopb_generator.py" -vV || true
+
+	CMAKE_FLAGS="$CMAKE_FLAGS -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)"
+	# keg-only formulae (protobuf@29) are not linked into /opt/homebrew/bin, so
+	# prepend their bin explicitly; for the plain `protobuf` formula this is a
+	# harmless no-op that keeps the two cases on one code path.
+	PROTOC_BIN_DIR="$(brew --prefix "$PROTOBUF_FORMULA" 2>/dev/null || true)/bin"
+	if [ -x "$PROTOC_BIN_DIR/protoc" ]; then
+		export PATH="$PROTOC_BIN_DIR:$PATH"
+	fi
+	log "protoc: $(command -v protoc || echo NOT-FOUND)"
+	log "protoc version: $(protoc --version 2>/dev/null || echo 'n/a')"
+
+	# chiaki-ng uses the deprecated FindPythonInterp module, which honors
+	# PYTHON_EXECUTABLE; Python3_EXECUTABLE is set for the modern FindPython3
+	# in case a future release switches over.
+	CMAKE_FLAGS="$CMAKE_FLAGS \
+		-DPYTHON_EXECUTABLE=$PYTHON_VENV_DIR/bin/python3 \
+		-DPython3_EXECUTABLE=$PYTHON_VENV_DIR/bin/python3"
+fi
+
 # ---------- 3. configure + build (lib only, static) ----------
 CMAKE_FLAGS="-G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
 	-DCHIAKI_ENABLE_GUI=OFF \
@@ -136,14 +214,12 @@ CMAKE_FLAGS="-G Ninja -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
 	-DCHIAKI_ENABLE_STEAM_SHORTCUT=OFF \
 	-DCHIAKI_ENABLE_SPEEX=OFF \
 	-DCHIAKI_ENABLE_FFMPEG_DECODER=OFF"
-if [ "$OS" = "Darwin" ]; then
-	CMAKE_FLAGS="$CMAKE_FLAGS -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)"
-fi
+	
 # curl is used by chiaki purely over HTTP/1.1 (no CURLOPT_HTTP_VERSION=2
 # anywhere in lib/); force the bundled curl off nghttp2/HTTP2 so it neither
 # pulls a libnghttp2 dependency nor carries dead http2 code into the static
 # lib. Disabling it has no functional impact on remote play.
-CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF"
+CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF -DCURL_USE_LIBSSH2=OFF -DUSE_LIBIDN2=OFF -DCURL_USE_LIBPSL=OFF"
 
 # STATIC SWITCH: this is the only STATIC macro the whole stack actually needs.
 # nm on the produced libchiaki.a confirms the only third-party __imp_ (DLL

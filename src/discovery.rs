@@ -179,7 +179,7 @@ impl<'a> Discovery<'a> {
             ffi::chiaki_discovery_init(
                 &mut *raw,
                 log.as_ptr() as *mut _,
-                if ipv6 { AF_INET6 } else { AF_INET },
+                if ipv6 { AF_INET6 as _ } else { AF_INET as _ },
             )
         })?;
         Ok(Discovery {

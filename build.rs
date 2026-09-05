@@ -114,10 +114,14 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib={lib}");
         }
     } else if is_macos {
-        for lib in ["ssl", "crypto", "opus", "json-c", "miniupnpc", "event", "m", "z"] {
+        for lib in ["ssl", "crypto", "opus", "json-c", "miniupnpc", "event"] {
+            println!("cargo:rustc-link-lib=static={lib}");
+        }
+        for lib in ["m", "z"] {
             println!("cargo:rustc-link-lib=dylib={lib}");
         }
         println!("cargo:rustc-link-lib=framework=CoreServices");
+        println!("cargo:rustc-link-lib=framework=SystemConfiguration");
     } else {
         panic!("libchiaki: unsupported target {target}");
     }
