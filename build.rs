@@ -134,14 +134,15 @@ fn link_platform_deps(os: TargetOs) {
         TargetOs::Windows => {
             // mingw64 的库 (ssl/opus/event 等的 .a 与 .dll.a) 所在目录,
             // MSYS2 布局固定, 由根直接推出。
-            match msys_root() {
+            match msys2_root() {
                 Some(root) => println!(
                     "cargo:rustc-link-search=native={}",
                     root.join("mingw64/lib").display()
                 ),
                 None => println!(
-                    "cargo:warning=MSYS2 mingw64/bin not found on PATH; \
-                     linking ssl/crypto/opus/json-c/miniupnpc/event may fail"
+                    "cargo:warning=MSYS2 not detected (no mingw64/bin on PATH); \
+                     add it to PATH (e.g. C:\\msys64\\mingw64\\bin), \
+                     otherwise linking ssl/crypto/opus/json-c/miniupnpc/event will fail"
                 ),
             }
             // MSYS2 ships both a static <lib>.a and an import <lib>.dll.a.
@@ -257,10 +258,10 @@ fn link_platform_deps(os: TargetOs) {
 // MSYS2 安装且布局固定 (<root>/mingw64/{bin,lib}), 其余路径一律由根推出。
 // ---------------------------------------------------------------------------
 
-/// 从 PATH 上识别 MSYS2 根: 构建要求 <root>/mingw64/bin 在 PATH 上
-/// (链接器/编译器在其中), <root>/usr/bin/msys-2.0.dll 是 MSYS2 的
-/// 签名文件。定位有代价 (PATH 扫描 + 签名校验), 结果缓存, 只跑一次。
-fn msys_root() -> Option<&'static Path> {
+/// MSYS2 根定位: 从 PATH 上识别 <root>/mingw64/bin (构建要求链接器/
+/// 编译器在其中), <root>/usr/bin/msys-2.0.dll 是 MSYS2 的签名文件。
+/// 定位有代价 (PATH 扫描 + 签名校验), 结果缓存, 只跑一次。
+fn msys2_root() -> Option<&'static Path> {
     static MSYS_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
     MSYS_ROOT
         .get_or_init(|| {
@@ -290,7 +291,7 @@ fn find_libclang() {
         return;
     }
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(root) = msys_root() {
+    if let Some(root) = msys2_root() {
         dirs.push(root.join("mingw64/bin"));
     }
     if let Ok(pf) = env::var("ProgramFiles") {
