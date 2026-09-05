@@ -1,5 +1,6 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 // Static chiaki stack, in GNU-ld dependency order
 // (dependents first: jerasure needs gf_complete, so it comes first).
@@ -38,18 +39,12 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=LIBCHIAKI_PREFIX");
     // clang-sys 在所有平台都读它来定位 libclang (Windows 分支的
-    // ensure_libclang 只是在未设置时自动填充一份合适的默认值)。
+    // find_libclang 只是在未设置时自动填充一份合适的默认值)。
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     // LIBCHIAKI_STATIC_LIBS 只影响 Linux/macOS 分支的链接策略, Windows
     // 不读取也不监听它。
     if os == TargetOs::Linux || os == TargetOs::MacOS {
         println!("cargo:rerun-if-env-changed=LIBCHIAKI_STATIC_LIBS");
-    }
-    if os == TargetOs::Windows {
-        // 这两个只影响 Windows 的 mingw sysroot 探测, 其余平台读它们
-        // 没有意义, 不声明以免无谓的重新构建。
-        println!("cargo:rerun-if-env-changed=MINGW_PREFIX");
-        println!("cargo:rerun-if-env-changed=MSYS2_ROOT");
     }
 
     // --- link ---
@@ -59,7 +54,7 @@ fn main() {
 
     // --- bindgen ---
     if os == TargetOs::Windows {
-        ensure_libclang();
+        find_libclang();
     }
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let bindings = build_bindings(&include_dir, &out);
@@ -137,13 +132,15 @@ fn link_stack(lib_dir: &std::path::Path) {
 fn link_platform_deps(os: TargetOs) {
     match os {
         TargetOs::Windows => {
-            // Dynamic deps live in the mingw64 sysroot (import libs).
-            match find_mingw_lib() {
-                Some(mingw_lib) => {
-                    println!("cargo:rustc-link-search=native={}", mingw_lib.display())
-                }
+            // mingw64 的库 (ssl/opus/event 等的 .a 与 .dll.a) 所在目录,
+            // MSYS2 布局固定, 由根直接推出。
+            match msys_root() {
+                Some(root) => println!(
+                    "cargo:rustc-link-search=native={}",
+                    root.join("mingw64/lib").display()
+                ),
                 None => println!(
-                    "cargo:warning=mingw sysroot not found (set MINGW_PREFIX or MSYS2_ROOT); \
+                    "cargo:warning=MSYS2 mingw64/bin not found on PATH; \
                      linking ssl/crypto/opus/json-c/miniupnpc/event may fail"
                 ),
             }
@@ -255,58 +252,46 @@ fn link_platform_deps(os: TargetOs) {
     }
 }
 
-/// Locate <mingw64>/lib. Never hardcoded to a single drive:
-/// MINGW_PREFIX (msys or windows style) -> MSYS2_ROOT -> well-known roots.
-fn find_mingw_lib() -> Option<PathBuf> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = env::var("MINGW_PREFIX") {
-        if p.starts_with('/') {
-            // msys-style (e.g. /mingw64): need the msys root for a win path.
-            if let Some(root) = msys_root() {
-                roots.push(root.join(p.trim_start_matches('/')));
-            }
-        } else {
-            roots.push(PathBuf::from(p));
-        }
-    } else if let Some(root) = msys_root() {
-        roots.push(root.join("mingw64"));
-    }
-    for r in roots {
-        let lib = r.join("lib");
-        if lib.join("libssl.dll.a").is_file() || lib.join("libcrypto.dll.a").is_file() {
-            return Some(lib);
-        }
-    }
-    None
+// ---------------------------------------------------------------------------
+// Windows (MSYS2) 专属: 根定位与 libclang 自动填充。假设机器上只有一个
+// MSYS2 安装且布局固定 (<root>/mingw64/{bin,lib}), 其余路径一律由根推出。
+// ---------------------------------------------------------------------------
+
+/// 从 PATH 上识别 MSYS2 根: 构建要求 <root>/mingw64/bin 在 PATH 上
+/// (链接器/编译器在其中), <root>/usr/bin/msys-2.0.dll 是 MSYS2 的
+/// 签名文件。定位有代价 (PATH 扫描 + 签名校验), 结果缓存, 只跑一次。
+fn msys_root() -> Option<&'static Path> {
+    static MSYS_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    MSYS_ROOT
+        .get_or_init(|| {
+            env::split_paths(&env::var_os("PATH")?).find(|bin| {
+                bin.file_name().is_some_and(|n| n == "bin")
+                    && bin
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .is_some_and(|n| n == "mingw64")
+                    && bin
+                        .parent()
+                        .and_then(Path::parent)
+                        .is_some_and(|root| root.join("usr/bin/msys-2.0.dll").is_file())
+            }).and_then(|bin| {
+                bin.parent().and_then(Path::parent).map(Path::to_path_buf)
+            })
+        })
+        .as_deref()
 }
 
-fn msys_root() -> Option<PathBuf> {
-    let mut cands: Vec<PathBuf> = Vec::new();
-    if let Ok(r) = env::var("MSYS2_ROOT") {
-        cands.push(PathBuf::from(r));
-    }
-    for d in ["E:/msys64", "C:/msys64", "C:/tools/msys64", "D:/msys64"] {
-        cands.push(PathBuf::from(d));
-    }
-    cands
-        .into_iter()
-        .find(|r| r.join("mingw64").join("bin").join("gcc.exe").is_file())
-}
-
-/// Point clang-sys at a libclang before bindgen runs.
-/// Prefer mingw64's (same default target/headers as the GCC-built lib).
-fn ensure_libclang() {
+/// LIBCLANG_PATH 未设置时查找 libclang 并填充 (已设置则让路, 不覆盖
+/// 用户的选择), 供 clang-sys 加载。只认 mingw64 的 libclang: 与被解析
+/// 的 GCC 头文件环境同源 — MSVC 系 libclang 默认 target/内置头不同,
+/// 解析 MinGW 头文件会报错。找不到只告警, 让 bindgen 自己报错。
+fn find_libclang() {
     if env::var_os("LIBCLANG_PATH").is_some() {
         return;
     }
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = env::var("MINGW_PREFIX") {
-        if !p.starts_with('/') {
-            dirs.push(PathBuf::from(p).join("bin"));
-        }
-    }
     if let Some(root) = msys_root() {
-        dirs.push(root.join("mingw64").join("bin"));
+        dirs.push(root.join("mingw64/bin"));
     }
     if let Ok(pf) = env::var("ProgramFiles") {
         dirs.push(PathBuf::from(pf).join("LLVM").join("bin"));
@@ -321,6 +306,10 @@ fn ensure_libclang() {
     }
     println!("cargo:warning=LIBCLANG_PATH unset and no libclang found; bindgen may fail");
 }
+
+// ---------------------------------------------------------------------------
+// Windows (MSYS2) 专属区块结束
+// ---------------------------------------------------------------------------
 
 /// Run bindgen over every installed chiaki header.
 fn build_bindings(include_dir: &std::path::Path, out: &std::path::Path) -> bindgen::Bindings {
