@@ -243,18 +243,13 @@ fn build_bindings(include_dir: &std::path::Path, out: &std::path::Path) -> bindg
         b = b.header(h.as_str());
     }
     b.clang_arg(format!("-I{}", path_str(include_dir)))
-        // Only emit items defined in chiaki headers, plus the Win32 value
-        // types embedded in them (they would otherwise turn opaque and
-        // silently poison every layout containing them: ChiakiMutex,
-        // ChiakiTakion, ChiakiSession, ...).
+        // Only emit items defined in chiaki headers. Win32/POSIX 类型
+        // (CRITICAL_SECTION、sockaddr_storage 等) 被按值嵌入 chiaki 结构体,
+        // bindgen 会把它们作为传递依赖完整生成并附带 layout 断言, 无需
+        // allowlist; 但只以指针引用的类型 (sockaddr/sockaddr_in) 不会生成,
+        // src 里却要用 (见 discovery.rs), 这里按名字放行。
         .allowlist_file(".*/chiaki/.*\\.h")
-        .allowlist_type(
-            "CRITICAL_SECTION|_RTL_CRITICAL_SECTION|\
-             CONDITION_VARIABLE|_RTL_CONDITION_VARIABLE|\
-             sockaddr_storage|sockaddr|SOCKADDR|\
-             sockaddr_in|SOCKADDR_IN|in_addr|IN_ADDR|\
-             in6_addr|IN6_ADDR|ADDRESS_FAMILY|SOCKET",
-        )
+        .allowlist_type("sockaddr|sockaddr_in")
         // AF_INET/AF_INET6 are macros in the system socket headers with
         // per-OS values (winsock 23 / Linux 10 / BSD 30); take them from the
         // real headers of each target instead of hand-maintaining the table.
