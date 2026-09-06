@@ -17,21 +17,23 @@ pub type Codec = ffi::ChiakiCodec;
 pub type QuitReason = ffi::ChiakiQuitReason;
 pub type DualSenseIntensity = ffi::ChiakiDualSenseEffectIntensity;
 
+// 这四个是 C 头文件里的 static inline, 走 wrap_static_fns 生成的
+// __extern 包装而非 Rust 重写 — 单一事实来源, 上游改动不会漂移
+// (审计 A4)。
 pub fn target_is_unknown(t: Target) -> bool {
-    t == ffi::ChiakiTarget::CHIAKI_TARGET_PS4_UNKNOWN
-        || t == ffi::ChiakiTarget::CHIAKI_TARGET_PS5_UNKNOWN
+    unsafe { ffi::chiaki_target_is_unknown(t) }
 }
 
 pub fn target_is_ps5(t: Target) -> bool {
-    t as u32 >= ffi::ChiakiTarget::CHIAKI_TARGET_PS5_UNKNOWN as u32
+    unsafe { ffi::chiaki_target_is_ps5(t) }
 }
 
 pub fn codec_is_h265(c: Codec) -> bool {
-    c == ffi::ChiakiCodec::CHIAKI_CODEC_H265 || c == ffi::ChiakiCodec::CHIAKI_CODEC_H265_HDR
+    unsafe { ffi::chiaki_codec_is_h265(c) }
 }
 
 pub fn codec_is_hdr(c: Codec) -> bool {
-    c == ffi::ChiakiCodec::CHIAKI_CODEC_H265_HDR
+    unsafe { ffi::chiaki_codec_is_hdr(c) }
 }
 
 pub fn codec_name(c: Codec) -> String {
@@ -61,8 +63,7 @@ pub fn quit_reason_string(r: QuitReason) -> String {
 }
 
 pub fn quit_reason_is_error(r: QuitReason) -> bool {
-    r != ffi::ChiakiQuitReason::CHIAKI_QUIT_REASON_STOPPED
-        && r != ffi::ChiakiQuitReason::CHIAKI_QUIT_REASON_STREAM_CONNECTION_REMOTE_SHUTDOWN
+    unsafe { ffi::chiaki_quit_reason_is_error(r) }
 }
 
 /// C: `chiaki_error_string`。
