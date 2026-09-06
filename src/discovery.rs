@@ -312,9 +312,18 @@ pub struct DiscoveryServiceOptions {
 unsafe impl Send for DiscoveryServiceOptions {}
 
 impl DiscoveryServiceOptions {
+    /// 默认值对齐 chiaki-ng GUI (discoverymanager.cpp): hosts_max=16,
+    /// ping=500ms, drop_pings=3。不能是全零 — hosts_max=0 会让 C 侧
+    /// calloc(0) 返回 NULL, init 直接报 MEMORY; ping_ms=0 会让服务
+    /// 线程忙轮询发包。ping_initial_ms 保持 0 (首个 ping 立即发出,
+    /// 与 GUI 一致)。
     pub fn new() -> Self {
+        let mut raw = unsafe { zeroed_box::<ffi::ChiakiDiscoveryServiceOptions>() };
+        raw.hosts_max = 16;
+        raw.ping_ms = 500;
+        raw.host_drop_pings = 3;
         DiscoveryServiceOptions {
-            raw: unsafe { zeroed_box::<ffi::ChiakiDiscoveryServiceOptions>() },
+            raw,
             _send_host: None,
         }
     }
@@ -336,6 +345,16 @@ impl DiscoveryServiceOptions {
         self.raw.send_host = c.as_ptr() as *mut c_char;
         self._send_host = Some(c);
         Ok(())
+    }
+
+    pub fn hosts_max(&self) -> usize {
+        self.raw.hosts_max
+    }
+    pub fn ping_ms(&self) -> u64 {
+        self.raw.ping_ms
+    }
+    pub fn host_drop_pings(&self) -> u64 {
+        self.raw.host_drop_pings
     }
 }
 

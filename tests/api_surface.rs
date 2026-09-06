@@ -111,3 +111,13 @@ fn opus_frame_length_checked() {
     assert!(enc.frame(&mut []).is_err());
     assert!(enc.frame(&mut [0i16; 960]).is_err());
 }
+
+#[test]
+fn discovery_service_options_defaults() {
+    // 零值默认在 C 侧不可用 (hosts_max=0 → calloc(0)=NULL → init 报
+    // MEMORY; ping_ms=0 → 忙轮询), 必须对齐 GUI 的初始值。
+    let o = DiscoveryServiceOptions::new();
+    assert_eq!(o.hosts_max(), 16);
+    assert_eq!(o.ping_ms(), 500);
+    assert_eq!(o.host_drop_pings(), 3);
+}
