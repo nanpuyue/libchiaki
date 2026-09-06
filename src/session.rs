@@ -264,6 +264,9 @@ pub struct Session<'a> {
     _haptics_sink: Option<ErasedCallback>,
     _display_sink: Option<ErasedCallback>,
     joined: bool,
+    // join 的公开契约只覆盖 start 创建的线程; 未 start 就 join 是
+    // 契约外的用法 (底层恰好不崩, 见 docs/SAFETY_REVIEW.md S3)。
+    started: bool,
     // 生命周期只用于追踪 log 的借用; Log / LogSniffer 都 Deref 到
     // ffi::ChiakiLog, 见 new / new_with_raw_log。
     _log: PhantomData<&'a ffi::ChiakiLog>,
@@ -309,12 +312,17 @@ impl<'a> Session<'a> {
             _haptics_sink: None,
             _display_sink: None,
             joined: false,
+            started: false,
             _log: PhantomData,
         })
     }
 
     pub fn start(&mut self) -> Result<(), Error> {
-        cvt(unsafe { ffi::chiaki_session_start(self.ptr) })
+        let r = cvt(unsafe { ffi::chiaki_session_start(self.ptr) });
+        if r.is_ok() {
+            self.started = true;
+        }
+        r
     }
 
     pub fn stop(&mut self) -> Result<(), Error> {
@@ -492,7 +500,7 @@ impl Drop for Session<'_> {
             // 最佳努力: 先停、等线程结束 (回调 holder 在字段 drop 时才释放,
             // 此时 C 线程已结束, 无 UAF)。
             let _ = ffi::chiaki_session_stop(self.ptr);
-            if !self.joined {
+            if self.started && !self.joined {
                 let _ = ffi::chiaki_session_join(self.ptr);
             }
             ffi::chiaki_session_fini(self.ptr);
