@@ -340,6 +340,9 @@ impl DiscoveryServiceOptions {
     pub fn set_host_drop_pings(&mut self, n: u64) {
         self.raw.host_drop_pings = n;
     }
+    /// 设置单播发送目标 host。注意: 成功构建 `DiscoveryService` 后,
+    /// 该字符串的所有权转移给 C (service fini 时由 C 释放), 本结构体
+    /// 不再持有。
     pub fn set_send_host(&mut self, host: &str) -> Result<(), std::ffi::NulError> {
         let c = CString::new(host)?;
         self.raw.send_host = c.as_ptr() as *mut c_char;
@@ -424,6 +427,10 @@ impl<'a> DiscoveryService<'a> {
             unsafe { dealloc(ptr as *mut u8, layout) };
             return Err(e);
         }
+        // send_host 的所有权已随结构体拷贝转移给 C: chiaki_discovery_service_fini
+        // 会 free 它 (头文件未承诺, 但这是公开 fini 的实际行为, Rust 侧必须
+        // 让渡)。这里拿走 CString 防止 Options Drop 时二次释放。
+        options._send_host = None;
         Ok(DiscoveryService {
             ptr,
             layout,
