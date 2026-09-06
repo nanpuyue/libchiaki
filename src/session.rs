@@ -477,7 +477,7 @@ impl<'a> Session<'a> {
     }
 
     /// 内部 `ChiakiSession *` (供关联封装如 OpusEncoder 使用)。
-    pub fn as_ptr(&self) -> *mut ffi::ChiakiSession {
+    pub(crate) fn as_ptr(&self) -> *mut ffi::ChiakiSession {
         self.ptr
     }
 
