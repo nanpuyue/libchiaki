@@ -96,12 +96,12 @@ fn target_os(target: &str) -> TargetOs {
     }
 }
 
-/// 校验并返回 chiaki 开发前缀 (scripts/build-chiaki.sh 的产物,
+/// 校验并返回 chiaki 开发前缀 (build-libchiaki.sh 的产物,
 /// 布局: include/ + lib/)。
 fn chiaki_prefix() -> (PathBuf, PathBuf) {
     let prefix = PathBuf::from(env::var("LIBCHIAKI_PREFIX").expect(
         "LIBCHIAKI_PREFIX must point at the chiaki dev prefix produced \
-             by scripts/build-chiaki.sh (layout: include/ + lib/)",
+             by build-libchiaki.sh (layout: include/ + lib/)",
     ));
     let include_dir = prefix.join("include");
     let lib_dir = prefix.join("lib");
@@ -150,7 +150,7 @@ fn link_platform_deps(os: TargetOs) {
             // DLL deps beyond the OS. Same bare-name list as PKG_DEPS'
             // fallback column: third-party static curl's optional deps
             // (ssh2/psl/idn2/unistring/iconv/brotli/zstd) are disabled in
-            // scripts/build-chiaki.sh, so libcurl.a references none of them
+            // build-libchiaki.sh, so libcurl.a references none of them
             // (nm-verified); only zlib survives.
             for &(_, fallback) in PKG_DEPS {
                 for lib in fallback {
@@ -180,16 +180,18 @@ fn link_platform_deps(os: TargetOs) {
             //   名单   -> 逗号分隔库名, 名单内 static= 其余 dylib=;
             //            名单外的库名忽略并警告
             let static_env = env::var("LIBCHIAKI_STATIC_LIBS").ok();
-            let static_list: Option<Vec<&str>> =
-                static_env.as_deref().map(|v| match v.trim() {
+            let static_list: Option<Vec<&str>> = static_env.as_deref().map(|v| match v.trim() {
                 "all" => PKG_DEPS
                     .iter()
                     .flat_map(|(_, l)| l.iter().copied())
                     .collect(),
                 "none" => Vec::new(),
                 v => {
-                    let mut list: Vec<&str> =
-                        v.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                    let mut list: Vec<&str> = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     let unknown: Vec<&str> = list
                         .iter()
                         .copied()
@@ -265,19 +267,19 @@ fn msys2_root() -> Option<&'static Path> {
     static MSYS_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
     MSYS_ROOT
         .get_or_init(|| {
-            env::split_paths(&env::var_os("PATH")?).find(|bin| {
-                bin.file_name().is_some_and(|n| n == "bin")
-                    && bin
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .is_some_and(|n| n == "mingw64")
-                    && bin
-                        .parent()
-                        .and_then(Path::parent)
-                        .is_some_and(|root| root.join("usr/bin/msys-2.0.dll").is_file())
-            }).and_then(|bin| {
-                bin.parent().and_then(Path::parent).map(Path::to_path_buf)
-            })
+            env::split_paths(&env::var_os("PATH")?)
+                .find(|bin| {
+                    bin.file_name().is_some_and(|n| n == "bin")
+                        && bin
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .is_some_and(|n| n == "mingw64")
+                        && bin
+                            .parent()
+                            .and_then(Path::parent)
+                            .is_some_and(|root| root.join("usr/bin/msys-2.0.dll").is_file())
+                })
+                .and_then(|bin| bin.parent().and_then(Path::parent).map(Path::to_path_buf))
         })
         .as_deref()
 }

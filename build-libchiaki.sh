@@ -38,7 +38,7 @@
 #                       each other by construction.
 #                       If it breaks on an older nanopb submodule, pin back:
 #                         PIP_MODULES='protobuf>=5,<6 grpcio-tools>=5,<6' \
-#                         PROTOBUF_FORMULA=protobuf@29 ./scripts/build-chiaki.sh
+#                         PROTOBUF_FORMULA=protobuf@29 ./build-libchiaki.sh
 #                       Drop grpcio-tools to force nanopb onto brew's protoc.
 #   PROTOBUF_FORMULA    brew formula providing protoc, default "protobuf"
 #                       (currently 35.x, pairs with python-protobuf 6.x).
@@ -47,7 +47,14 @@
 #
 # Example (MSYS2 MINGW64 shell):
 #   export LIBCHIAKI_PREFIX=/e/build/libchiaki-install
-#   ./scripts/build-chiaki.sh
+#   ./build-libchiaki.sh
+#
+# Building the Rust binding afterwards (PowerShell, plain shell):
+#   $env:LIBCHIAKI_PREFIX = "E:\build\libchiaki-install"
+#   $env:PATH = "E:\msys64\mingw64\bin;$env:PATH"
+#   cargo +stable-x86_64-pc-windows-gnu build    # toolchain must be the
+#                                                # windows-gnu one (MSVC
+#                                                # cannot link the .a)
 set -euo pipefail
 
 : "${LIBCHIAKI_PREFIX:?set LIBCHIAKI_PREFIX to the install prefix first}"
@@ -83,7 +90,7 @@ BUILD_DIR="$SRC/build-lib"
 PYTHON_VENV_DIR="$SRC/build-nanopb-venv"
 OS="$(uname -s)"
 
-log() { echo "[build-chiaki] $*"; }
+log() { echo "[build-libchiaki] $*"; }
 
 # ---------- 1. system dependencies ----------
 MINGW_PKGS="git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \

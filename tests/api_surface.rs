@@ -1,0 +1,91 @@
+//! 新增封装 (orientation / opus / log sniffer / 杂项) 的功能验证。
+
+use libchiaki::*;
+use std::ffi::CString;
+
+#[test]
+fn base64_roundtrip() {
+    let s = "hello chiaki";
+    let enc = base64_encode(s.as_bytes()).unwrap();
+    assert_eq!(enc, "aGVsbG8gY2hpYWtp");
+    let dec = base64_decode(&enc).unwrap();
+    assert_eq!(String::from_utf8(dec).unwrap(), s);
+}
+
+#[test]
+fn time_monotonic() {
+    let a = time_now_monotonic_us();
+    let b = time_now_monotonic_us();
+    assert!(b >= a);
+    assert!(time_now_monotonic_ms() >= b / 1000);
+}
+
+#[test]
+fn random_bytes() {
+    let r = random_32();
+    let mut buf = [0u8; 32];
+    random_bytes_crypt(&mut buf).unwrap();
+    // 与自身内容不同的概率 1-2^-32
+    assert!(buf.iter().any(|&b| b != 0) || r == 0);
+}
+
+#[test]
+fn controller_set_idle_in_place() {
+    let mut s = ControllerState::idle();
+    s.0.buttons = BUTTON_CROSS;
+    s.set_idle();
+    assert!(s.equals(&ControllerState::idle()));
+}
+
+#[test]
+fn orientation_tracker() {
+    let mut tracker = OrientationTracker::new();
+    let mut accel_zero = AccelNewZero::new();
+    let mut state = ControllerState::idle();
+    tracker.update(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, &mut accel_zero, false, 1000);
+    tracker.apply_to_controller_state(&mut state);
+}
+
+#[test]
+fn log_sniffer_captures() {
+    let forward = Log::print_to_stdout(LOG_ALL);
+    let sniffer = LogSniffer::new(LOG_ALL, &forward);
+    // 通过变参 C API 写一条日志, 应同时进入 sniffer 缓冲并转发。
+    let fmt = CString::new("rust sniff test %d").unwrap();
+    unsafe {
+        ffi::chiaki_log(
+            sniffer.as_log_ptr(),
+            ffi::ChiakiLogLevel::CHIAKI_LOG_INFO,
+            fmt.as_ptr(),
+            42i32,
+        );
+    }
+    assert!(sniffer.buffer().contains("rust sniff test 42"));
+}
+
+#[test]
+fn audio_header_roundtrip() {
+    let mut h = AudioHeader::new(2, 16, 48000, 960);
+    assert_eq!(h.frame_bytes(), 960 * 2 * 2);
+    let mut buf = [0u8; 32];
+    h.save(&mut buf);
+    let h2 = AudioHeader::load(&buf);
+    assert_eq!(h2.0.rate, 48000);
+    assert_eq!(h2.0.frame_size, 960);
+    // 上游 bug: save 写 buf[0]=bits / buf[1]=channels, load 按
+    // buf[0]=channels / buf[1]=bits 读, 两者互换。封装忠实还原该行为。
+    assert_eq!(h2.0.channels, 16);
+    assert_eq!(h2.0.bits, 2);
+}
+
+#[test]
+fn opus_encoder_decoder_lifecycle() {
+    let log = Log::print_to_stdout(LOG_ALL);
+    let enc = OpusEncoder::new(&log);
+    let mut dec = OpusDecoder::new(&log);
+    dec.set_cb(|_, _| {}, |_: &mut [i16]| {});
+    let _sink = dec.sink();
+    // header() 需要活动 session, 这里只验证 init/fini 生命周期。
+    drop(enc);
+    drop(dec);
+}

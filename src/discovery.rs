@@ -1,4 +1,4 @@
-﻿//! 上线发现: Discovery / DiscoveryThread / DiscoveryService。
+//! 上线发现: Discovery / DiscoveryThread / DiscoveryService。
 
 use std::alloc::{Layout, alloc, dealloc};
 use std::ffi::CString;
@@ -23,7 +23,11 @@ fn ipv4_sockaddr(ip: [u8; 4], port: u16) -> ffi::sockaddr_in {
     a.sin_port = port.to_be();
     // sin_addr 在三个平台都是 4 字节原始地址 (Windows 上是 union, 成员名不同),
     // 按字节写入, 平台无关。
-    unsafe { (&raw mut a.sin_addr).cast::<u32>().write_unaligned(u32::from_ne_bytes(ip)) };
+    unsafe {
+        (&raw mut a.sin_addr)
+            .cast::<u32>()
+            .write_unaligned(u32::from_ne_bytes(ip))
+    };
     // BSD 的 sockaddr_in 开头有 sin_len (整个结构体的长度), 其余平台没有。
     #[cfg(target_vendor = "apple")]
     {
@@ -44,7 +48,10 @@ unsafe impl Send for DiscoveryPacket {}
 impl DiscoveryPacket {
     fn with_cmd(cmd: ffi::ChiakiDiscoveryCmd, version: &[u8], credential: u64) -> Self {
         // bindgen 的字符串宏是带 NUL 的字节数组, 先截断再 CString::new。
-        let end = version.iter().position(|&b| b == 0).unwrap_or(version.len());
+        let end = version
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(version.len());
         let ver = CString::new(&version[..end]).expect("protocol version");
         let mut raw = unsafe { zeroed_box::<ffi::ChiakiDiscoveryPacket>() };
         raw.cmd = cmd;
@@ -135,10 +142,8 @@ pub fn discovery_host_state_string(s: ffi::ChiakiDiscoveryHostState) -> String {
     cstr_to_string(unsafe { ffi::chiaki_discovery_host_state_string(s) })
 }
 
-unsafe extern "C" fn discovery_trampoline<F>(
-    host: *mut ffi::ChiakiDiscoveryHost,
-    user: *mut c_void,
-) where
+unsafe extern "C" fn discovery_trampoline<F>(host: *mut ffi::ChiakiDiscoveryHost, user: *mut c_void)
+where
     F: FnMut(DiscoveryHostInfo) + Send + 'static,
 {
     if host.is_null() || user.is_null() {
@@ -167,7 +172,11 @@ impl<'a> Discovery<'a> {
             ffi::chiaki_discovery_init(
                 &mut *raw,
                 log.as_ptr() as *mut _,
-                if ipv6 { ffi::AF_INET6 as _ } else { ffi::AF_INET as _ },
+                if ipv6 {
+                    ffi::AF_INET6 as _
+                } else {
+                    ffi::AF_INET as _
+                },
             )
         })?;
         Ok(Discovery {
@@ -245,11 +254,7 @@ pub struct DiscoveryThread<'a> {
 unsafe impl Send for DiscoveryThread<'_> {}
 
 impl<'a> DiscoveryThread<'a> {
-    pub fn start<F>(
-        discovery: &'a mut Discovery<'a>,
-        oneshot: bool,
-        cb: F,
-    ) -> Result<Self, Error>
+    pub fn start<F>(discovery: &'a mut Discovery<'a>, oneshot: bool, cb: F) -> Result<Self, Error>
     where
         F: FnMut(DiscoveryHostInfo) + Send + 'static,
     {
@@ -374,11 +379,7 @@ pub struct DiscoveryService<'a> {
 unsafe impl Send for DiscoveryService<'_> {}
 
 impl<'a> DiscoveryService<'a> {
-    pub fn new<F>(
-        options: DiscoveryServiceOptions,
-        log: &'a Log,
-        cb: F,
-    ) -> Result<Self, Error>
+    pub fn new<F>(options: DiscoveryServiceOptions, log: &'a Log, cb: F) -> Result<Self, Error>
     where
         F: FnMut(Vec<DiscoveryHostInfo>) + Send + 'static,
     {

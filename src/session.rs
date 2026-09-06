@@ -1,4 +1,4 @@
-﻿//! 流 Session: 事件、视频/音频回调、手柄输入、生命周期管理。
+//! 流 Session: 事件、视频/音频回调、手柄输入、生命周期管理。
 
 use std::alloc::{Layout, alloc, dealloc};
 use std::ffi::CString;
@@ -55,22 +55,41 @@ pub(crate) fn parse_registered_host(h: &ffi::ChiakiRegisteredHost) -> Registered
 #[derive(Debug, Clone)]
 pub enum Event {
     Connected,
-    LoginPinRequest { pin_incorrect: bool },
-    Holepunch { finished: bool },
+    LoginPinRequest {
+        pin_incorrect: bool,
+    },
+    Holepunch {
+        finished: bool,
+    },
     Regist(RegisteredHost),
     NicknameReceived(String),
     KeyboardOpen,
     KeyboardTextChange(String),
     KeyboardRemoteClose,
-    Rumble { unknown: u8, left: u8, right: u8 },
-    Quit { reason: QuitReason, reason_str: String },
-    TriggerEffects { type_left: u8, type_right: u8, left: [u8; 10], right: [u8; 10] },
+    Rumble {
+        unknown: u8,
+        left: u8,
+        right: u8,
+    },
+    Quit {
+        reason: QuitReason,
+        reason_str: String,
+    },
+    TriggerEffects {
+        type_left: u8,
+        type_right: u8,
+        left: [u8; 10],
+        right: [u8; 10],
+    },
     MotionReset,
     LedColor([u8; 3]),
     PlayerIndex(u8),
     HapticIntensity(DualSenseIntensity),
     TriggerIntensity(DualSenseIntensity),
-    VideoFecFailure { frame_index: i32, idr_request_sent: bool },
+    VideoFecFailure {
+        frame_index: i32,
+        idr_request_sent: bool,
+    },
 }
 
 fn parse_event(ev: &ffi::ChiakiEvent) -> Event {
@@ -129,10 +148,8 @@ pub struct VideoSample<'a> {
     pub frame_recovered: bool,
 }
 
-unsafe extern "C" fn event_trampoline<F>(
-    event: *mut ffi::ChiakiEvent,
-    user: *mut c_void,
-) where
+unsafe extern "C" fn event_trampoline<F>(event: *mut ffi::ChiakiEvent, user: *mut c_void)
+where
     F: FnMut(Event) + Send + 'static,
 {
     if event.is_null() || user.is_null() {
@@ -247,7 +264,9 @@ pub struct Session<'a> {
     _haptics_sink: Option<ErasedCallback>,
     _display_sink: Option<ErasedCallback>,
     joined: bool,
-    _log: PhantomData<&'a Log>,
+    // 生命周期只用于追踪 log 的借用; Log / LogSniffer 都 Deref 到
+    // ffi::ChiakiLog, 见 new / new_with_raw_log。
+    _log: PhantomData<&'a ffi::ChiakiLog>,
 }
 
 // SAFETY: chiaki 的 session API 为跨线程使用设计
@@ -257,6 +276,13 @@ unsafe impl Send for Session<'_> {}
 
 impl<'a> Session<'a> {
     pub fn new(info: ConnectInfo, log: &'a Log) -> Result<Self, Error> {
+        Self::new_with_raw_log(info, log)
+    }
+
+    /// 同 [`new`](Self::new), 但直接接受 C 侧的 `ChiakiLog *` —
+    /// 允许把 [`LogSniffer`](crate::log::LogSniffer) 的 sniff log
+    /// 交给 session (Deref 强制转换会把 `&LogSniffer` 变成 `&ChiakiLog`)。
+    pub fn new_with_raw_log(info: ConnectInfo, log: &'a ffi::ChiakiLog) -> Result<Self, Error> {
         let size = size_of::<ffi::ChiakiSession>();
         let align = align_of::<ffi::ChiakiSession>();
         let layout = Layout::from_size_align(size, align)
@@ -267,7 +293,7 @@ impl<'a> Session<'a> {
         }
         unsafe { ptr::write_bytes(ptr as *mut u8, 0, size) };
         let rc = unsafe {
-            ffi::chiaki_session_init(ptr, info.as_ptr() as *mut _, log.as_ptr() as *mut _)
+            ffi::chiaki_session_init(ptr, info.as_ptr() as *mut _, log as *const _ as *mut _)
         };
         if let Err(e) = cvt(rc) {
             unsafe { dealloc(ptr as *mut u8, layout) };
@@ -305,10 +331,7 @@ impl<'a> Session<'a> {
 
     pub fn set_controller_state(&mut self, state: &ControllerState) -> Result<(), Error> {
         cvt(unsafe {
-            ffi::chiaki_session_set_controller_state(
-                self.ptr,
-                &state.0 as *const _ as *mut _,
-            )
+            ffi::chiaki_session_set_controller_state(self.ptr, &state.0 as *const _ as *mut _)
         })
     }
 
@@ -361,11 +384,7 @@ impl<'a> Session<'a> {
     {
         let holder = ErasedCallback::new(f);
         unsafe {
-            ffi::chiaki_session_set_event_cb(
-                self.ptr,
-                Some(event_trampoline::<F>),
-                holder.ptr,
-            )
+            ffi::chiaki_session_set_event_cb(self.ptr, Some(event_trampoline::<F>), holder.ptr)
         };
         self._event_cb = Some(holder);
     }
@@ -435,6 +454,36 @@ impl<'a> Session<'a> {
         unsafe { ffi::chiaki_session_ctrl_set_display_sink(self.ptr, &mut sink) };
         self._display_sink = Some(holder);
     }
+
+    /// 内部 `ChiakiSession *` (供关联封装如 OpusEncoder 使用)。
+    pub fn as_ptr(&self) -> *mut ffi::ChiakiSession {
+        self.ptr
+    }
+
+    /// C: `chiaki_video_receiver_set_waiting_for_idr` — 手动请求
+    /// 等待 IDR 帧 (丢包恢复后强制刷新画面时用)。
+    pub fn video_receiver_set_waiting_for_idr(&mut self, waiting: bool) {
+        let vr = unsafe { (*self.ptr).stream_connection.video_receiver };
+        if !vr.is_null() {
+            unsafe { ffi::chiaki_video_receiver_set_waiting_for_idr(vr, waiting) };
+        }
+    }
+
+    /// C: `chiaki_video_receiver_get_waiting_for_idr`。
+    pub fn video_receiver_waiting_for_idr(&self) -> bool {
+        let vr = unsafe { (*self.ptr).stream_connection.video_receiver };
+        !vr.is_null() && unsafe { ffi::chiaki_video_receiver_get_waiting_for_idr(vr) }
+    }
+
+    /// C: `chiaki_video_receiver_get_frames_lost_total`。
+    pub fn video_receiver_frames_lost_total(&self) -> i32 {
+        let vr = unsafe { (*self.ptr).stream_connection.video_receiver };
+        if vr.is_null() {
+            0
+        } else {
+            unsafe { ffi::chiaki_video_receiver_get_frames_lost_total(vr) }
+        }
+    }
 }
 
 impl Drop for Session<'_> {
@@ -462,6 +511,18 @@ impl AudioHeader {
         let mut h = ffi::ChiakiAudioHeader::default();
         unsafe { ffi::chiaki_audio_header_set(&mut h, channels, bits, rate, frame_size) };
         AudioHeader(h)
+    }
+
+    /// C: `chiaki_audio_header_load` — 从序列化字节 (14 字节) 反序列化。
+    pub fn load(buf: &[u8]) -> Self {
+        let mut h: ffi::ChiakiAudioHeader = unsafe { std::mem::zeroed() };
+        unsafe { ffi::chiaki_audio_header_load(&mut h, buf.as_ptr()) };
+        AudioHeader(h)
+    }
+
+    /// C: `chiaki_audio_header_save` — 序列化到 `buf` (需 ≥ 14 字节)。
+    pub fn save(&mut self, buf: &mut [u8]) {
+        unsafe { ffi::chiaki_audio_header_save(&mut self.0 as *mut _, buf.as_mut_ptr()) };
     }
 
     pub fn frame_bytes(&self) -> usize {

@@ -1,10 +1,10 @@
-﻿//! 公开 API 冒烟测试 (链接验证 + 基本行为, 不需要真实 PS 主机)。
+//! 公开 API 冒烟测试 (链接验证 + 基本行为, 不需要真实 PS 主机)。
 //!
-//! 运行: CHIAKI_INSTALL_DIR 指向 scripts/build-chiaki.sh 的产物,
+//! 运行: CHIAKI_INSTALL_DIR 指向 build-libchiaki.sh 的产物,
 //! `cargo test --target x86_64-pc-windows-gnu` (Windows, MINGW64 shell)。
 
 use libchiaki::{
-    ConnectInfo, ControllerState, DiscoveryPacket, Error, Log, LOG_ALL, ffi, lib_init,
+    ConnectInfo, ControllerState, DiscoveryPacket, Error, LOG_ALL, Log, ffi, lib_init,
 };
 
 #[test]

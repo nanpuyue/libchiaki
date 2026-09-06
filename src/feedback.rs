@@ -13,8 +13,13 @@ impl HistoryEvent {
         HistoryEvent(unsafe { std::mem::zeroed() })
     }
 
-    pub fn set_button(&mut self, button: u64, state: u8) -> Result<(), Error> {
-        cvt(unsafe { ffi::chiaki_feedback_history_event_set_button(&mut self.0, button, state) })
+    /// C 参数是 uint64_t, 但取值域就是 ChiakiControllerButton /
+    /// AnalogButton 的位掩码 (全部落在 u32), 这里收窄为 u32 与
+    /// BUTTON_* 常量 / state.buttons 同域, 免去调用方强转。
+    pub fn set_button(&mut self, button: u32, state: u8) -> Result<(), Error> {
+        cvt(unsafe {
+            ffi::chiaki_feedback_history_event_set_button(&mut self.0, button as u64, state)
+        })
     }
 
     pub fn set_touchpad(&mut self, down: bool, pointer_id: u8, x: u16, y: u16) {
@@ -47,10 +52,7 @@ impl HistoryBuffer {
 
     pub fn push(&mut self, event: &HistoryEvent) {
         unsafe {
-            ffi::chiaki_feedback_history_buffer_push(
-                &mut *self.raw,
-                &event.0 as *const _ as *mut _,
-            )
+            ffi::chiaki_feedback_history_buffer_push(&mut *self.raw, &event.0 as *const _ as *mut _)
         };
     }
 

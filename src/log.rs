@@ -1,5 +1,7 @@
 //! 日志 (`ChiakiLog` 的 RAII 封装)。
 
+use std::ffi::CStr;
+use std::marker::PhantomData;
 use std::os::raw::{c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -56,12 +58,7 @@ impl Log {
         let holder = ErasedCallback::new(cb);
         let mut raw = unsafe { crate::util::zeroed_box::<ffi::ChiakiLog>() };
         unsafe {
-            ffi::chiaki_log_init(
-                &mut *raw,
-                mask,
-                Some(log_trampoline::<F>),
-                holder.ptr,
-            );
+            ffi::chiaki_log_init(&mut *raw, mask, Some(log_trampoline::<F>), holder.ptr);
         }
         Log {
             raw,
@@ -94,5 +91,64 @@ impl Log {
 
     pub fn as_mut_ptr(&mut self) -> *mut ffi::ChiakiLog {
         &mut *self.raw
+    }
+}
+
+impl std::ops::Deref for Log {
+    type Target = ffi::ChiakiLog;
+    fn deref(&self) -> &ffi::ChiakiLog {
+        &self.raw
+    }
+}
+
+/// C: `chiaki_log_sniffer_*` — 在原日志之前截流一份副本到内存缓冲。
+/// 典型用法: session / regist 用 sniffer 的 log (`as_log_ptr` 或 Deref),
+/// 结束后 `buffer()` 拿到全部输出展示在界面里。
+pub struct LogSniffer<'a> {
+    raw: Box<ffi::ChiakiLogSniffer>,
+    _forward: PhantomData<&'a Log>,
+}
+
+// SAFETY: buf 由 chiaki 内部线程追加 (加锁), 结构体本身 init 后只读。
+unsafe impl Send for LogSniffer<'_> {}
+unsafe impl Sync for LogSniffer<'_> {}
+
+impl<'a> LogSniffer<'a> {
+    /// C: `chiaki_log_sniffer_init` — 截流 `mask` 级别的日志, 全部
+    /// 转发给 `forward`。
+    pub fn new(mask: u32, forward: &'a Log) -> Self {
+        let mut raw = unsafe { crate::util::zeroed_box::<ffi::ChiakiLogSniffer>() };
+        unsafe { ffi::chiaki_log_sniffer_init(&mut *raw, mask, forward.as_ptr() as *mut _) };
+        LogSniffer {
+            raw,
+            _forward: PhantomData,
+        }
+    }
+
+    /// C: `chiaki_log_sniffer_get_buffer` — 目前已截流的全部文本。
+    pub fn buffer(&self) -> String {
+        if self.raw.buf.is_null() {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(self.raw.buf).to_string_lossy().into_owned() }
+    }
+
+    /// 嗅探到的日志指针 (交给 Session::new_with_raw_log 等)。
+    /// SAFETY: C 侧只往 sniff_log 写 level_mask, 返回 *mut 以匹配 API。
+    pub fn as_log_ptr(&self) -> *mut ffi::ChiakiLog {
+        &self.raw.sniff_log as *const _ as *mut _
+    }
+}
+
+impl std::ops::Deref for LogSniffer<'_> {
+    type Target = ffi::ChiakiLog;
+    fn deref(&self) -> &ffi::ChiakiLog {
+        &self.raw.sniff_log
+    }
+}
+
+impl Drop for LogSniffer<'_> {
+    fn drop(&mut self) {
+        unsafe { ffi::chiaki_log_sniffer_fini(&mut *self.raw) };
     }
 }

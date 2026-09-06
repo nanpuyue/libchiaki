@@ -11,7 +11,10 @@ pub type ResolutionPreset = ffi::ChiakiVideoResolutionPreset;
 pub type FpsPreset = ffi::ChiakiVideoFPSPreset;
 
 /// 按分辨率 / 帧率预设生成 video profile。
-pub fn video_profile_preset(res: ResolutionPreset, fps: FpsPreset) -> ffi::ChiakiConnectVideoProfile {
+pub fn video_profile_preset(
+    res: ResolutionPreset,
+    fps: FpsPreset,
+) -> ffi::ChiakiConnectVideoProfile {
     let mut p = ffi::ChiakiConnectVideoProfile::default();
     unsafe { ffi::chiaki_connect_video_profile_preset(&mut p, res, fps) };
     p

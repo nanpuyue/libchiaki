@@ -151,8 +151,9 @@ impl<'a> HolepunchSession<'a> {
     pub fn stun_allocation(&mut self) -> Option<(i32, bool)> {
         let mut inc = 0i32;
         let mut random = false;
-        let ok =
-            unsafe { ffi::chiaki_holepunch_session_get_stun_allocation(self.raw, &mut inc, &mut random) };
+        let ok = unsafe {
+            ffi::chiaki_holepunch_session_get_stun_allocation(self.raw, &mut inc, &mut random)
+        };
         if ok { Some((inc, random)) } else { None }
     }
 

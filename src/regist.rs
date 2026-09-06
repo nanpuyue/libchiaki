@@ -10,8 +10,8 @@ use crate::common::Target;
 use crate::error::{Error, cvt};
 use crate::ffi;
 use crate::log::Log;
-use crate::session::parse_registered_host;
 use crate::session::RegisteredHost;
+use crate::session::parse_registered_host;
 use crate::util::{ErasedCallback, zeroed_box};
 
 /// `ChiakiRegistInfo` builder。
@@ -63,10 +63,8 @@ pub enum RegistEvent {
     FinishedSuccess(RegisteredHost),
 }
 
-unsafe extern "C" fn regist_trampoline<F>(
-    event: *mut ffi::ChiakiRegistEvent,
-    user: *mut c_void,
-) where
+unsafe extern "C" fn regist_trampoline<F>(event: *mut ffi::ChiakiRegistEvent, user: *mut c_void)
+where
     F: FnMut(RegistEvent) + Send + 'static,
 {
     if event.is_null() || user.is_null() {
@@ -85,9 +83,7 @@ unsafe extern "C" fn regist_trampoline<F>(
             if ev.registered_host.is_null() {
                 RegistEvent::FinishedFailed
             } else {
-                RegistEvent::FinishedSuccess(parse_registered_host(unsafe {
-                    &*ev.registered_host
-                }))
+                RegistEvent::FinishedSuccess(parse_registered_host(unsafe { &*ev.registered_host }))
             }
         }
     };
