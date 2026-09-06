@@ -99,3 +99,15 @@ fn opus_encoder_decoder_lifecycle() {
     drop(enc);
     drop(dec);
 }
+
+#[test]
+fn opus_frame_length_checked() {
+    let log = Log::print_to_stdout(LOG_ALL);
+    let mut enc = OpusEncoder::new(&log);
+    // 未绑定 header 时期望采样数为 0, frame() 必须拒绝而不进 C 侧。
+    // (绑定 header 需要 Session, 按测试原则不建网络对象; 绑定后的
+    // 校验与这里是同一个比较分支, expected 由 expected_pcm_len 决定。)
+    assert_eq!(enc.expected_pcm_len(), 0);
+    assert!(enc.frame(&mut []).is_err());
+    assert!(enc.frame(&mut [0i16; 960]).is_err());
+}

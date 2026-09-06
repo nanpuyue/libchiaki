@@ -12,6 +12,7 @@ use std::os::raw::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
+use crate::error::Error;
 use crate::ffi;
 use crate::log::Log;
 use crate::session::{AudioHeader, Session};
@@ -39,10 +40,23 @@ impl OpusEncoder {
         unsafe { ffi::chiaki_opus_encoder_header(&mut header.0, &mut *self.raw, session.as_ptr()) };
     }
 
+    /// header 绑定后期望的 PCM 采样数 (frame_size × channels);
+    /// 未绑定 header 时为 0。
+    pub fn expected_pcm_len(&self) -> usize {
+        self.raw.audio_header.frame_size as usize * self.raw.audio_header.channels as usize
+    }
+
     /// C: `chiaki_opus_encoder_frame` — 编码一帧 PCM 并自动发送。
-    /// `pcm` 必须恰好是 header 里 frame_size × channels 个采样。
-    pub fn frame(&mut self, pcm: &mut [i16]) {
+    /// C 侧固定读取 `frame_size × channels` 个采样而不感知缓冲大小,
+    /// 这里校验长度: 未绑定 header 或长度不符都会被拒绝 (与 H1 同类
+    /// 的安全修复, 见 docs/API_CONSISTENCY_AUDIT.md A1)。
+    pub fn frame(&mut self, pcm: &mut [i16]) -> Result<(), Error> {
+        let expected = self.expected_pcm_len();
+        if expected == 0 || pcm.len() != expected {
+            return Err(Error(ffi::ChiakiErrorCode::CHIAKI_ERR_INVALID_DATA));
+        }
         unsafe { ffi::chiaki_opus_encoder_frame(pcm.as_mut_ptr(), &mut *self.raw) };
+        Ok(())
     }
 
     /// 音频参数 (header 成功绑定后有效)。
