@@ -64,6 +64,14 @@ dependencies, so this crate does not require them.
 `LIBCLANG_PATH` (libclang for bindgen) also influences the build; changing it
 re-triggers the build script.
 
+## License
+
+AGPL-3.0-only (with the same additional permission allowing OpenSSL linking
+as upstream chiaki-ng, see `LICENSE`). The bindings are generated from
+libchiaki's AGPL headers and statically link `libchiaki.a` — any binary
+conveyed together with them is an AGPL-3.0 combined work and must come with
+its corresponding source. Private use and internal use have no obligations.
+
 ## Testing
 
 `cargo test` runs the bindgen-generated layout assertions (every bound struct
