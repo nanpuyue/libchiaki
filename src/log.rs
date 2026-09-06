@@ -103,15 +103,21 @@ impl std::ops::Deref for Log {
 
 /// C: `chiaki_log_sniffer_*` — 在原日志之前截流一份副本到内存缓冲。
 /// 典型用法: session / regist 用 sniffer 的 log (`as_log_ptr` 或 Deref),
-/// 结束后 `buffer()` 拿到全部输出展示在界面里。
+/// 使用它的会话对象全部结束后 `buffer()` 拿到全部输出展示在界面里。
+///
+/// 线程安全: C 侧 `log_sniffer_push` 对缓冲的 realloc **无锁** (log.c),
+/// 公开 API 亦未承诺并发安全 — 多线程同时经同一 sniffer log 打日志、
+/// 或日志进行中调用 `buffer()` 都属于上游未定义行为。因此本类型只
+/// `Send` 不 `Sync`; 请把"产生日志的对象"与 sniffer 放在同一线程,
+/// 或保证日志已停再读缓冲。
 pub struct LogSniffer<'a> {
     raw: Box<ffi::ChiakiLogSniffer>,
     _forward: PhantomData<&'a Log>,
 }
 
-// SAFETY: buf 由 chiaki 内部线程追加 (加锁), 结构体本身 init 后只读。
+// SAFETY: Send 允许整体移动到别的线程 (C 指针随结构体走);
+// 不提供 Sync — 缓冲无锁, 共享引用并发读写在 C 侧是数据竞争。
 unsafe impl Send for LogSniffer<'_> {}
-unsafe impl Sync for LogSniffer<'_> {}
 
 impl<'a> LogSniffer<'a> {
     /// C: `chiaki_log_sniffer_init` — 截流 `mask` 级别的日志, 全部
@@ -126,6 +132,8 @@ impl<'a> LogSniffer<'a> {
     }
 
     /// C: `chiaki_log_sniffer_get_buffer` — 目前已截流的全部文本。
+    /// 仅在产生日志的对象 (session/regist 等) 停止或 Drop 之后调用 —
+    /// 与仍在打日志的 C 线程并发读取属于数据竞争 (见类型级 doc)。
     pub fn buffer(&self) -> String {
         if self.raw.buf.is_null() {
             return String::new();
