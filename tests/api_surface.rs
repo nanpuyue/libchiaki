@@ -68,14 +68,24 @@ fn audio_header_roundtrip() {
     let mut h = AudioHeader::new(2, 16, 48000, 960);
     assert_eq!(h.frame_bytes(), 960 * 2 * 2);
     let mut buf = [0u8; 32];
-    h.save(&mut buf);
-    let h2 = AudioHeader::load(&buf);
+    h.save(&mut buf).unwrap();
+    let h2 = AudioHeader::load(&buf).unwrap();
     assert_eq!(h2.0.rate, 48000);
     assert_eq!(h2.0.frame_size, 960);
     // 上游 bug: save 写 buf[0]=bits / buf[1]=channels, load 按
     // buf[0]=channels / buf[1]=bits 读, 两者互换。封装忠实还原该行为。
     assert_eq!(h2.0.channels, 16);
     assert_eq!(h2.0.bits, 2);
+}
+
+#[test]
+fn audio_header_short_buf_rejected() {
+    let mut h = AudioHeader::new(2, 16, 48000, 960);
+    // C 侧固定读写 14 字节, 短切片必须在 Rust 侧被拒绝而非越界。
+    assert!(h.save(&mut [0u8; 13]).is_err());
+    assert!(AudioHeader::load(&[0u8; 13]).is_err());
+    assert!(h.save(&mut [0u8; 14]).is_ok());
+    assert!(AudioHeader::load(&[0u8; 14]).is_ok());
 }
 
 #[test]

@@ -506,6 +506,10 @@ impl Drop for Session<'_> {
 #[repr(transparent)]
 pub struct AudioHeader(pub ffi::ChiakiAudioHeader);
 
+/// C 序列化格式的固定长度: channels(1) + bits(1) + rate(4) +
+/// frame_size(4) + unknown(4)。
+const AUDIO_HEADER_SERIALIZED_SIZE: usize = 14;
+
 impl AudioHeader {
     pub fn new(channels: u8, bits: u8, rate: u32, frame_size: u32) -> Self {
         let mut h = ffi::ChiakiAudioHeader::default();
@@ -513,16 +517,25 @@ impl AudioHeader {
         AudioHeader(h)
     }
 
-    /// C: `chiaki_audio_header_load` — 从序列化字节 (14 字节) 反序列化。
-    pub fn load(buf: &[u8]) -> Self {
+    /// C: `chiaki_audio_header_load` — 从序列化字节反序列化。
+    /// C 侧固定读取 14 字节, 这里校验长度, 保证安全签名不会越界。
+    pub fn load(buf: &[u8]) -> Result<Self, Error> {
+        if buf.len() < AUDIO_HEADER_SERIALIZED_SIZE {
+            return Err(Error(ffi::ChiakiErrorCode::CHIAKI_ERR_INVALID_DATA));
+        }
         let mut h: ffi::ChiakiAudioHeader = unsafe { std::mem::zeroed() };
         unsafe { ffi::chiaki_audio_header_load(&mut h, buf.as_ptr()) };
-        AudioHeader(h)
+        Ok(AudioHeader(h))
     }
 
-    /// C: `chiaki_audio_header_save` — 序列化到 `buf` (需 ≥ 14 字节)。
-    pub fn save(&mut self, buf: &mut [u8]) {
+    /// C: `chiaki_audio_header_save` — 序列化到 `buf`。
+    /// C 侧固定写入 14 字节, 这里校验长度, 保证安全签名不会越界。
+    pub fn save(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+        if buf.len() < AUDIO_HEADER_SERIALIZED_SIZE {
+            return Err(Error(ffi::ChiakiErrorCode::CHIAKI_ERR_INVALID_DATA));
+        }
         unsafe { ffi::chiaki_audio_header_save(&mut self.0 as *mut _, buf.as_mut_ptr()) };
+        Ok(())
     }
 
     pub fn frame_bytes(&self) -> usize {
