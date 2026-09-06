@@ -63,6 +63,12 @@ pub fn holepunch_generate_client_device_uid() -> Result<String, Error> {
 }
 
 /// Holepunch 会话句柄。`Drop` 时 fini (流结束后调用)。
+///
+/// 所有权两种去向:
+/// - 未注入 `ConnectInfo`: Rust Drop 负责 fini (可能阻塞并联网 —
+///   C 侧 fini 会向 PSN 服务器优雅注销并等通知);
+/// - 已通过 [`ConnectInfo::set_holepunch_session`](crate::ConnectInfo::set_holepunch_session)
+///   注入: 所有权转移给 C Session (其 fini 负责 fini), Rust 侧不再释放。
 pub struct HolepunchSession<'a> {
     raw: ffi::ChiakiHolepunchSession,
     _log: PhantomData<&'a Log>,
@@ -160,6 +166,11 @@ impl<'a> HolepunchSession<'a> {
     /// 取消建连流程 (stop_thread 控制是否停 websocket 线程)。
     pub fn cancel(&mut self, stop_thread: bool) {
         unsafe { ffi::chiaki_holepunch_main_thread_cancel(self.raw, stop_thread) };
+    }
+
+    /// 内部句柄 (供 `ConnectInfo::set_holepunch_session` 注入)。
+    pub(crate) fn as_ptr(&self) -> ffi::ChiakiHolepunchSession {
+        self.raw
     }
 }
 

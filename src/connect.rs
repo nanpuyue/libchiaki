@@ -5,6 +5,7 @@ use std::os::raw::c_char;
 
 use crate::common::Codec;
 use crate::ffi;
+use crate::holepunch::HolepunchSession;
 use crate::util::zeroed_box;
 
 pub type ResolutionPreset = ffi::ChiakiVideoResolutionPreset;
@@ -111,6 +112,19 @@ impl ConnectInfo {
     }
     pub fn set_audio_video_disabled(&mut self, v: ffi::ChiakiDisableAudioVideo) {
         self.raw.audio_video_disabled = v;
+    }
+
+    /// PSN 互联网远程: 注入打洞会话 (`ChiakiConnectInfo.holepunch_session`)。
+    /// C 侧 start 时自动从该句柄取 RUDP socket 并做内部 regist
+    /// (session.c), 因此无需也不会使用 rudp_sock 字段。
+    ///
+    /// **所有权转移**: 底层 `chiaki_session_fini` 会直接 fini 注入的
+    /// 打洞会话 (init 错误路径同样), 因此这里按值消费 `HolepunchSession`
+    /// 并阻止其 Rust Drop — 注入后句柄由 C Session 拥有, 必须在
+    /// `Session` 之前存活、之后消亡。
+    pub fn set_holepunch_session(&mut self, s: HolepunchSession) {
+        self.raw.holepunch_session = s.as_ptr();
+        std::mem::forget(s);
     }
 
     pub(crate) fn as_ptr(&self) -> *const ffi::ChiakiConnectInfo {

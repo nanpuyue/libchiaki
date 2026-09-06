@@ -75,5 +75,8 @@ its corresponding source. Private use and internal use have no obligations.
 ## Testing
 
 `cargo test` runs the bindgen-generated layout assertions (every bound struct
-is checked against the C compiler's layout at compile time) plus functional
-tests that load the real `libchiaki.a`.
+is checked against the C compiler's layout at compile time), a symbol-linkage
+test (every public entry point must resolve against `libchiaki.a`), and
+functional tests for the binding layer. Tests never touch the network, sockets,
+or real consoles — they validate the binding, not the C library's runtime
+behavior; that is upstream chiaki-ng's concern.
