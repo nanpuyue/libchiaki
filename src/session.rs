@@ -386,6 +386,11 @@ impl<'a> Session<'a> {
     }
 
     /// 设置事件回调 (start 之前调用; 回调在 chiaki 内部线程触发)。
+    ///
+    /// 重入约束: 公开 API 未承诺回调触发时 C 侧的锁状态 (当前实现
+    /// 不持锁, 但可能随上游变化), 因此回调内不要调用本 Session 的
+    /// 会修改状态的方法 (`set_controller_state` / `set_login_pin` 等),
+    /// 建议只投递事件到其他线程处理。
     pub fn set_event_callback<F>(&mut self, f: F)
     where
         F: FnMut(Event) + Send + 'static,
