@@ -122,6 +122,9 @@ impl ConnectInfo {
     /// 打洞会话 (init 错误路径同样), 因此这里按值消费 `HolepunchSession`
     /// 并阻止其 Rust Drop — 注入后句柄由 C Session 拥有, 必须在
     /// `Session` 之前存活、之后消亡。
+    ///
+    /// 边界场景: 注入后若丢弃 ConnectInfo 且从未构建 `Session`, C 句柄
+    /// 无人 fini (资源泄漏) — 正常流 (注入即构建) 不受影响。
     pub fn set_holepunch_session(&mut self, s: HolepunchSession) {
         self.raw.holepunch_session = s.as_ptr();
         std::mem::forget(s);
