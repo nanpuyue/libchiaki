@@ -55,6 +55,8 @@ impl Orientation {
     }
 
     /// 陀螺仪 (gx, gy, gz) + 加速度 (ax, ay, az) + 磁力计 (beta) 解算一步。
+    // 参数个数与 C 原型一一对应, 忠实签名优先 (clippy::too_many_arguments)。
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         gx: f32,
@@ -90,6 +92,8 @@ impl OrientationTracker {
     }
 
     /// C: `chiaki_orientation_tracker_update`。`timestamp_us` 用于两帧间隔。
+    // 参数个数与 C 原型一一对应, 忠实签名优先 (clippy::too_many_arguments)。
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         gx: f32,

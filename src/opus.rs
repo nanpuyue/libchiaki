@@ -1,7 +1,7 @@
 //! 麦克风编解码 (`chiaki/opusencoder.h` / `chiaki/opusdecoder.h`)。
 //!
 //! 与 C 侧同名 API 一一对应: 编码器把 PCM 帧编码后**自动**经 session 的
-//! AudioSender 发送 (`frame()` 内部完成); 解码器产出 [`ChiakiAudioSink`]
+//! AudioSender 发送 (`frame()` 内部完成); 解码器产出 [`ffi::ChiakiAudioSink`]
 //! (`sink()`) 交给 `Session::set_audio_sink_raw` 接收远端音频并回调 PCM。
 //!
 //! SAFETY 契约 (与 C 相同的 fini 顺序约束): 编码器/解码器必须比关联的
@@ -166,7 +166,7 @@ impl OpusDecoder {
     }
 
     /// C: `chiaki_opus_decoder_get_sink` — 产出可交给
-    /// `Session::set_audio_sink_raw` 的 sink。
+    /// `Session::set_audio_sink_raw` 的 sink (类型为 [`ffi::ChiakiAudioSink`])。
     pub fn sink(&mut self) -> ffi::ChiakiAudioSink {
         let mut sink: ffi::ChiakiAudioSink = unsafe { std::mem::zeroed() };
         unsafe { ffi::chiaki_opus_decoder_get_sink(&mut *self.raw, &mut sink) };
