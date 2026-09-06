@@ -22,7 +22,12 @@
 #                       must already be populated inside it)
 #   BUILD_TYPE          default Release
 #   JOBS                default nproc
-#   SKIP_DEPS=1         skip system package installation
+#   SKIP_DEPS=1         skip dependency check/install entirely
+#
+#   Dependencies are checked first (commands + pkg-config modules +
+#   python-protobuf); packages are only installed when something is
+#   missing. On an interactive terminal you are asked before the package
+#   manager runs; non-interactive runs (CI) install without asking.
 #
 #   --- Python venv for the nanopb generator (macOS only) ---
 #   chiaki-ng generates takion.pb.c/.pb.h at build time by running
@@ -99,29 +104,58 @@ trap 'echo "[build-libchiaki] FAILED at line $LINENO (step: ${CURRENT_STEP:-?})"
 
 # ---------- 1. system dependencies ----------
 CURRENT_STEP="system dependencies"
+# 先检查后安装: 全部就位则跳过, 有缺失才动包管理器; 交互终端会先
+# 征求确认 (非交互如 CI 直接装), SKIP_DEPS=1 则完全交由用户自管。
 MINGW_PKGS="git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
 	mingw-w64-x86_64-pkgconf mingw-w64-x86_64-protobuf \
 	mingw-w64-x86_64-python mingw-w64-x86_64-python-protobuf \
 	mingw-w64-x86_64-openssl mingw-w64-x86_64-opus mingw-w64-x86_64-json-c \
 	mingw-w64-x86_64-libevent mingw-w64-x86_64-miniupnpc"
+APT_PKGS="git cmake ninja-build pkg-config build-essential \
+	libssl-dev libopus-dev libjson-c-dev libevent-dev libminiupnpc-dev \
+	protobuf-compiler python3 python3-protobuf"
+DNF_PKGS="git cmake ninja-build pkgconf gcc openssl-devel opus-devel \
+	json-c-devel libevent-devel miniupnpc-devel protobuf-compiler \
+	python3 python3-protobuf"
+BREW_PKGS="git cmake ninja pkg-config openssl opus json-c libevent miniupnpc python"
 
-if [ "$SKIP_DEPS" != "1" ]; then
+deps_missing=()
+check_cmd() { command -v "$1" >/dev/null 2>&1 || deps_missing+=("$1"); }
+check_lib() { pkg-config --exists "$1" 2>/dev/null || deps_missing+=("$1"); }
+check_pyproto() { "$1" -c 'import google.protobuf' >/dev/null 2>&1 || deps_missing+=("$2"); }
+
+	if [ "$SKIP_DEPS" = "1" ]; then
+	log "SKIP_DEPS=1: dependency check/install skipped"
+else
 	case "$OS" in
 		MINGW* | MSYS* | CYGWIN*)
+			check_cmd git cmake ninja pkgconf gcc python protoc
+			check_lib openssl opus json-c libevent miniupnpc
+			check_pyproto python python3-protobuf
 			# -Syu: MSYS2 禁止 "只刷库不升级" 的部分升级, 会破坏工具链。
-			# shellcheck disable=SC2086
-			pacman -Syu --noconfirm --needed $MINGW_PKGS
+			install_hint="pacman -Syu --needed $MINGW_PKGS"
+			install_deps() {
+				# shellcheck disable=SC2086
+				pacman -Syu --noconfirm --needed $MINGW_PKGS
+			}
 			;;
 		Linux*)
+			check_cmd git cmake ninja pkg-config gcc python3 protoc
+			check_lib openssl opus json-c libevent miniupnpc
+			check_pyproto python3 python3-protobuf
 			if command -v apt-get >/dev/null 2>&1; then
-				sudo apt-get update
-				sudo apt-get install -y git cmake ninja-build pkg-config build-essential \
-					libssl-dev libopus-dev libjson-c-dev libevent-dev libminiupnpc-dev \
-					protobuf-compiler python3 python3-protobuf
+				install_hint="sudo apt-get update && sudo apt-get install $APT_PKGS"
+				install_deps() {
+					sudo apt-get update
+					# shellcheck disable=SC2086
+					sudo apt-get install -y $APT_PKGS
+				}
 			elif command -v dnf >/dev/null 2>&1; then
-				sudo dnf install -y git cmake ninja-build pkgconf gcc \
-					openssl-devel opus-devel json-c-devel libevent-devel miniupnpc-devel \
-					protobuf-compiler python3 python3-protobuf
+				install_hint="sudo dnf install $DNF_PKGS"
+				install_deps() {
+					# shellcheck disable=SC2086
+					sudo dnf install -y $DNF_PKGS
+				}
 			else
 				echo "need apt-get or dnf to install dependencies" >&2
 				exit 1
@@ -132,14 +166,41 @@ if [ "$SKIP_DEPS" != "1" ]; then
 				echo "need Homebrew to install dependencies" >&2
 				exit 1
 			}
-			brew install git cmake ninja pkg-config \
-				openssl opus json-c libevent miniupnpc "$PROTOBUF_FORMULA" python
+			check_cmd git cmake ninja pkg-config python3 protoc
+			check_lib openssl opus json-c libevent miniupnpc
+			# python-protobuf 不在此检查: macOS 走 venv (第 4 步), 由
+			# venv 里的 pip install 提供并校验 (PEP 668 装不进系统)。
+			install_hint="brew install $BREW_PKGS $PROTOBUF_FORMULA"
+			install_deps() {
+				# shellcheck disable=SC2086
+				brew install $BREW_PKGS "$PROTOBUF_FORMULA"
+			}
 			;;
 		*)
 			echo "unsupported OS: $OS" >&2
 			exit 1
 			;;
 	esac
+
+	if [ ${#deps_missing[@]} -eq 0 ]; then
+		log "all dependencies present"
+	else
+		log "missing dependencies: ${deps_missing[*]}"
+		if [ -t 0 ]; then
+			# 交互执行: 安装会改系统状态, 先征求确认。
+			printf "install them now with: %s ? [y/N] " "$install_hint"
+			read -r answer
+			case "$answer" in
+				y | Y | yes | Yes) ;;
+				*)
+					echo "aborted. install the packages listed above manually, then re-run." >&2
+					exit 1
+					;;
+			esac
+		fi
+		log "installing: $install_hint"
+		install_deps
+	fi
 fi
 
 # ---------- 2. source + submodules ----------
@@ -222,34 +283,48 @@ CMAKE_FLAGS="$CMAKE_FLAGS -DUSE_NGHTTP2=OFF -DCURL_USE_LIBSSH2=OFF \
 	-DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DUSE_LIBRTMP=OFF \
 	-DCURL_USE_GSSAPI=OFF -DCURL_USE_LIBSSH=OFF"
 
-# ---------- 4. Python venv for the nanopb generator (macOS only) ----------
+# ---------- 4. Python for the nanopb generator (macOS only) ----------
 # Homebrew's Python is PEP 668 externally-managed and refuses bare pip
-# installs, so the nanopb generator deps go into a venv. Linux/MSYS2 use
-# the system python-protobuf package installed in step 1 and skip this.
+# installs, so protobuf usually has to come from a venv — but if the
+# system python3 can already import it, skip the venv entirely. The venv
+# (when created) lives inside the throwaway source tree and is reused
+# across runs. Linux/MSYS2 use the system python-protobuf package from
+# step 1 and skip this whole section.
 if [ "$OS" = "Darwin" ]; then
 	PY3="$(command -v python3 || true)"
 	[ -n "$PY3" ] || { echo "python3 not found" >&2; exit 1; }
 
-	if [ -x "$PYTHON_VENV_DIR/bin/python3" ]; then
-		log "reusing venv: $PYTHON_VENV_DIR"
+	if "$PY3" -c 'import google.protobuf' >/dev/null 2>&1; then
+		log "system python3 already provides protobuf; no venv needed"
+		NANOPB_PY="$PY3"
 	else
-		log "creating venv: $PYTHON_VENV_DIR"
-		"$PY3" -m venv "$PYTHON_VENV_DIR"
+		if [ -x "$PYTHON_VENV_DIR/bin/python3" ]; then
+			log "reusing venv: $PYTHON_VENV_DIR"
+		else
+			log "creating venv: $PYTHON_VENV_DIR"
+			"$PY3" -m venv "$PYTHON_VENV_DIR"
+		fi
+
+		# Word-split on purpose, but `>=5,<6` must never reach the shell as a
+		# redirect, so go through an array instead of a bare $PIP_MODULES.
+		read -r -a PIP_MODULE_ARRAY <<<"$PIP_MODULES"
+		log "installing into venv: ${PIP_MODULES}"
+		# pip install is idempotent and fast when requirements are already met, so
+		# just run it unconditionally rather than tracking state ourselves.
+		"$PYTHON_VENV_DIR/bin/python3" -m pip install --quiet --disable-pip-version-check \
+			"${PIP_MODULE_ARRAY[@]}"
+		NANOPB_PY="$PYTHON_VENV_DIR/bin/python3"
 	fi
 
-	# Word-split on purpose, but `>=5,<6` must never reach the shell as a
-	# redirect, so go through an array instead of a bare $PIP_MODULES.
-	read -r -a PIP_MODULE_ARRAY <<<"$PIP_MODULES"
-	log "installing into venv: ${PIP_MODULES}"
-	# pip install is idempotent and fast when requirements are already met, so
-	# just run it unconditionally rather than tracking state ourselves.
-	"$PYTHON_VENV_DIR/bin/python3" -m pip install --quiet --disable-pip-version-check \
-		"${PIP_MODULE_ARRAY[@]}"
+	# 这是第 1 步在 macOS 上刻意跳过的 python-protobuf 检查: 无论走系统
+	# python 还是 venv, 在这里实际 import 一次, 失败要报清楚, 而不是埋进
+	# cmake 深处。
+	"$NANOPB_PY" -c 'import google.protobuf'
 
 	# Show what nanopb will actually pick up: which protoc, which
 	# python-protobuf. This is the one command that catches version mismatches
 	# before a full build. Keep an eye on the two version lines.
-	"$PYTHON_VENV_DIR/bin/python3" \
+	"$NANOPB_PY" \
 		"$SRC/third-party/nanopb/generator/nanopb_generator.py" -vV || true
 
 	CMAKE_FLAGS="$CMAKE_FLAGS -DOPENSSL_ROOT_DIR=$(brew --prefix openssl)"
@@ -267,8 +342,8 @@ if [ "$OS" = "Darwin" ]; then
 	# PYTHON_EXECUTABLE; Python3_EXECUTABLE is set for the modern FindPython3
 	# in case a future release switches over.
 	CMAKE_FLAGS="$CMAKE_FLAGS \
-		-DPYTHON_EXECUTABLE=$PYTHON_VENV_DIR/bin/python3 \
-		-DPython3_EXECUTABLE=$PYTHON_VENV_DIR/bin/python3"
+		-DPYTHON_EXECUTABLE=$NANOPB_PY \
+		-DPython3_EXECUTABLE=$NANOPB_PY"
 fi
 
 # ---------- 5. configure + build ----------
