@@ -41,7 +41,16 @@ impl RegistInfo {
     pub fn set_broadcast(&mut self, v: bool) {
         self.raw.broadcast = v;
     }
+    /// C 契约: `psn_online_id` 为 null 时回退使用 `psn_account_id`
+    /// (regist.h)。空字符串不是 null, 会被 C 当作非空 online_id 走
+    /// 错误路径 — 因此这里与 GUI (qmlbackend.cpp 对空值传 nullptr)
+    /// 一致: 空串等价于不设置。
     pub fn set_psn_online_id(&mut self, id: &str) -> Result<(), NulError> {
+        if id.is_empty() {
+            self.raw.psn_online_id = std::ptr::null_mut();
+            self._online_id = None;
+            return Ok(());
+        }
         let c = CString::new(id)?;
         self.raw.psn_online_id = c.as_ptr();
         self._online_id = Some(c);
