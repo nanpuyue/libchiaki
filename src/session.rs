@@ -318,6 +318,10 @@ impl<'a> Session<'a> {
     }
 
     pub fn start(&mut self) -> Result<(), Error> {
+        // 二次 start 会覆盖线程句柄导致线程泄漏 (公开契约: start 只调一次)。
+        if self.started {
+            return Err(Error(ffi::ChiakiErrorCode::CHIAKI_ERR_UNKNOWN));
+        }
         let r = cvt(unsafe { ffi::chiaki_session_start(self.ptr) });
         if r.is_ok() {
             self.started = true;
@@ -330,6 +334,14 @@ impl<'a> Session<'a> {
     }
 
     pub fn join(&mut self) -> Result<(), Error> {
+        // join 的契约是等待 start 创建的线程: 未 start 或已 join 都不属于
+        // 该契约, 直接以错误/幂等 Ok 处理, 不触碰 C (S3/S8)。
+        if self.joined {
+            return Ok(());
+        }
+        if !self.started {
+            return Err(Error(ffi::ChiakiErrorCode::CHIAKI_ERR_UNKNOWN));
+        }
         let r = cvt(unsafe { ffi::chiaki_session_join(self.ptr) });
         if r.is_ok() {
             self.joined = true;
@@ -345,10 +357,6 @@ impl<'a> Session<'a> {
 
     pub fn set_login_pin(&mut self, pin: &[u8]) -> Result<(), Error> {
         cvt(unsafe { ffi::chiaki_session_set_login_pin(self.ptr, pin.as_ptr(), pin.len()) })
-    }
-
-    pub fn request_idr(&mut self) -> Result<(), Error> {
-        cvt(unsafe { ffi::chiaki_session_request_idr(self.ptr) })
     }
 
     pub fn goto_bed(&mut self) -> Result<(), Error> {
@@ -471,6 +479,18 @@ impl<'a> Session<'a> {
     /// 内部 `ChiakiSession *` (供关联封装如 OpusEncoder 使用)。
     pub fn as_ptr(&self) -> *mut ffi::ChiakiSession {
         self.ptr
+    }
+
+    /// C: `chiaki_session_request_idr` — 请求关键帧。
+    ///
+    /// 时序约束: 只能在 [`start`](Self::start) 之后调用。C 侧此路径
+    /// 直达 takion 且无连接状态守卫, start 前调用会对**未初始化的
+    /// mutex** 加锁 (docs/SAFETY_REVIEW.md S7, Windows 上未定义行为)。
+    pub fn request_idr(&mut self) -> Result<(), Error> {
+        if !self.started {
+            return Err(Error(ffi::ChiakiErrorCode::CHIAKI_ERR_UNKNOWN));
+        }
+        cvt(unsafe { ffi::chiaki_session_request_idr(self.ptr) })
     }
 
     /// C: `chiaki_video_receiver_set_waiting_for_idr` — 手动请求
