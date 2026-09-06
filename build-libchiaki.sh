@@ -16,7 +16,10 @@
 #   LIBCHIAKI_PREFIX    (required) install prefix
 #   CHIAKI_VERSION      git tag/branch/commit, default v1.10.0
 #   CHIAKI_REPO         default https://github.com/streetpea/chiaki-ng.git
-#   CHIAKI_SRC_DIR      default ./chiaki-ng-src
+#   CHIAKI_SRC_DIR      default ./chiaki-ng-<version without the leading v>,
+#                       matching the directory name of GitHub release source
+#                       archives (a non-git dir is used as-is, submodules
+#                       must already be populated inside it)
 #   BUILD_TYPE          default Release
 #   JOBS                default nproc
 #   SKIP_DEPS=1         skip system package installation
@@ -60,7 +63,8 @@ set -euo pipefail
 : "${LIBCHIAKI_PREFIX:?set LIBCHIAKI_PREFIX to the install prefix first}"
 CHIAKI_VERSION="${CHIAKI_VERSION:-v1.10.0}"
 CHIAKI_REPO="${CHIAKI_REPO:-https://github.com/streetpea/chiaki-ng.git}"
-CHIAKI_SRC_DIR="${CHIAKI_SRC_DIR:-$(pwd)/chiaki-ng-src}"
+# 目录名与 GitHub release 源码包一致 (chiaki-ng-1.10.0), 解压即用。
+CHIAKI_SRC_DIR="${CHIAKI_SRC_DIR:-$PWD/chiaki-ng-${CHIAKI_VERSION#v}}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 SKIP_DEPS="${SKIP_DEPS:-0}"
@@ -91,8 +95,10 @@ PYTHON_VENV_DIR="$SRC/build-nanopb-venv"
 OS="$(uname -s)"
 
 log() { echo "[build-libchiaki] $*"; }
+trap 'echo "[build-libchiaki] FAILED at line $LINENO (step: ${CURRENT_STEP:-?})" >&2' ERR
 
 # ---------- 1. system dependencies ----------
+CURRENT_STEP="system dependencies"
 MINGW_PKGS="git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja \
 	mingw-w64-x86_64-pkgconf mingw-w64-x86_64-protobuf \
 	mingw-w64-x86_64-python mingw-w64-x86_64-python-protobuf \
@@ -102,8 +108,9 @@ MINGW_PKGS="git mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-nin
 if [ "$SKIP_DEPS" != "1" ]; then
 	case "$OS" in
 		MINGW* | MSYS* | CYGWIN*)
+			# -Syu: MSYS2 禁止 "只刷库不升级" 的部分升级, 会破坏工具链。
 			# shellcheck disable=SC2086
-			pacman -Sy --noconfirm && pacman -S --noconfirm --needed $MINGW_PKGS
+			pacman -Syu --noconfirm --needed $MINGW_PKGS
 			;;
 		Linux*)
 			if command -v apt-get >/dev/null 2>&1; then
@@ -136,30 +143,54 @@ if [ "$SKIP_DEPS" != "1" ]; then
 fi
 
 # ---------- 2. source + submodules ----------
+CURRENT_STEP="source checkout"
 # Only the submodules needed for a lib-only static build
 # (cpp-steam-tools/munit/oboe/borealis are GUI/CLI/test-only).
 SUBMODULES="third-party/nanopb third-party/jerasure third-party/gf-complete third-party/curl"
 
+# 非 git 目录 (GitHub release 源码包解压): 子模块必须已随包提供。
+submodules_present() {
+	local f
+	for f in third-party/curl/CMakeLists.txt \
+		third-party/nanopb/generator/nanopb_generator.py \
+		third-party/jerasure/include/jerasure.h \
+		third-party/gf-complete/include/gf_complete.h; do
+		[ -f "$SRC/$f" ] || return 1
+	done
+}
+
 if [ -d "$SRC/.git" ]; then
-	log "using existing source: $SRC"
-	# Judge submodule state via `git submodule status` (leading '-' not
-	# checked out, '+' wrong commit, 'U' conflict), not a sentinel file.
-	if git -C "$SRC" submodule status $SUBMODULES 2>/dev/null | grep -q '^[-+U]'; then
-		log "submodules not ready; initializing"
-		# shellcheck disable=SC2086
-		git -C "$SRC" submodule update --init $SUBMODULES
-		if git -C "$SRC" submodule status $SUBMODULES | grep -q '^[-+U]'; then
-			echo "submodules not ready" >&2
-			git -C "$SRC" submodule status >&2
-			exit 1
-		fi
+	log "using existing git source: $SRC"
+	# 换 CHIAKI_VERSION 重跑时必须真的切过去 (此前只在全新 clone 时
+	# checkout, 已存在的目录会静默构建旧版本)。本地没有该 ref 时先
+	# fetch 再试; fetch 失败 (离线) 但本地已有 ref 则无碍。
+	if ! git -C "$SRC" checkout -q "$CHIAKI_VERSION" 2>/dev/null; then
+		log "fetching to find $CHIAKI_VERSION"
+		git -C "$SRC" fetch --tags origin
+		git -C "$SRC" checkout -q "$CHIAKI_VERSION"
 	fi
 else
 	log "cloning $CHIAKI_REPO -> $SRC"
 	git clone "$CHIAKI_REPO" "$SRC"
-	git -C "$SRC" checkout "$CHIAKI_VERSION"
+	git -C "$SRC" checkout -q "$CHIAKI_VERSION"
+fi
+
+if [ -d "$SRC/.git" ]; then
+	# update --init 幂等且已就绪时开销极小, 无条件执行。
 	# shellcheck disable=SC2086
 	git -C "$SRC" submodule update --init $SUBMODULES
+	if git -C "$SRC" submodule status $SUBMODULES | grep -q '^[-+U]'; then
+		echo "submodules not ready" >&2
+		git -C "$SRC" submodule status >&2
+		exit 1
+	fi
+elif submodules_present; then
+	log "using non-git source (release archive?): submodules bundled"
+else
+	echo "source dir $SRC is not a git checkout and lacks submodule contents" >&2
+	echo "(GitHub auto-generated archives do NOT include submodules;" >&2
+	echo " use a release archive with vendored submodules, or git clone)" >&2
+	exit 1
 fi
 log "submodules ready"
 
@@ -241,6 +272,7 @@ if [ "$OS" = "Darwin" ]; then
 fi
 
 # ---------- 5. configure + build ----------
+CURRENT_STEP="cmake configure + build"
 # STATIC SWITCH: MINIUPNP_STATICLIB is the only STATIC macro the stack needs.
 # miniupnpc_declspec.h forces __declspec(dllimport) on _WIN32 unless it is
 # defined, which pins a runtime libminiupnpc.dll dependency; defining it makes
@@ -253,6 +285,7 @@ cmake -S "$SRC" -B "$BUILD_DIR" $CMAKE_FLAGS
 cmake --build "$BUILD_DIR" --target chiaki-lib -j "$JOBS"
 
 # ---------- 6. collect into $PREFIX ----------
+CURRENT_STEP="collect into $PREFIX"
 log "collecting into $PREFIX"
 rm -rf "$PREFIX/include/chiaki"
 rm -f "$PREFIX/lib/libchiaki.a" "$PREFIX/lib/libcurl.a" \
@@ -278,19 +311,21 @@ cp "$BUILD_DIR/lib/libchiaki.a" \
 	"$PREFIX/lib/"
 
 # ---------- 7. verify ----------
-NM="$(command -v nm || command -v llvm-nm || true)"
-if [ -z "$NM" ]; then
-	log "WARNING: nm not found, skipping symbol check"
-else
-	for sym in chiaki_lib_init chiaki_session_init chiaki_session_start \
-		chiaki_discovery_service_init chiaki_regist_start; do
-		"$NM" -g --defined-only "$PREFIX/lib/libchiaki.a" | grep -q " $sym\$" ||
-			{
-				echo "missing symbol: $sym" >&2
-				exit 1
-			}
-	done
-	log "symbols OK"
-fi
+CURRENT_STEP="verify artifacts"
+# 仅做产物存在性与非空检查 (跨平台, 无 binutils 依赖)。符号完整性由
+# 绑定库的 tests/link_symbols.rs 在每次 cargo test 时以链接方式保证。
+for f in "$PREFIX/lib/libchiaki.a" "$PREFIX/lib/libcurl.a" \
+	"$PREFIX/lib/libgf_complete.a" "$PREFIX/lib/libjerasure.a" \
+	"$PREFIX/lib/libprotobuf-nanopb.a" \
+	"$PREFIX/include/chiaki/session.h" "$PREFIX/include/chiaki/config.h" \
+	"$PREFIX/include/chiaki/takion.pb.h" "$PREFIX/include/pb.h"; do
+	[ -s "$f" ] || { echo "missing or empty artifact: $f" >&2; exit 1; }
+done
 
-log "done. For the rust binding: export LIBCHIAKI_PREFIX=$PREFIX"
+log "done."
+log "  version : $CHIAKI_VERSION ($BUILD_TYPE)"
+log "  prefix  : $PREFIX"
+for f in "$PREFIX"/lib/*.a; do
+	log "  $(basename "$f"): $(du -h "$f" | cut -f1)"
+done
+log "  next    : export LIBCHIAKI_PREFIX=$PREFIX && cargo build"
