@@ -11,7 +11,7 @@ use libchiaki::ffi;
 
 #[test]
 fn public_symbols_resolve_at_link_time() {
-    let addrs: &[*const ()] = &[
+    let mut list: Vec<*const ()> = vec![
         // lib 生命周期
         ffi::chiaki_lib_init as *const (),
         // session
@@ -82,14 +82,6 @@ fn public_symbols_resolve_at_link_time() {
         ffi::chiaki_feedback_history_buffer_push as *const (),
         ffi::chiaki_feedback_history_buffer_format as *const (),
         ffi::chiaki_feedback_history_event_set_button as *const (),
-        // opus
-        ffi::chiaki_opus_encoder_init as *const (),
-        ffi::chiaki_opus_encoder_header as *const (),
-        ffi::chiaki_opus_encoder_frame as *const (),
-        ffi::chiaki_opus_encoder_fini as *const (),
-        ffi::chiaki_opus_decoder_init as *const (),
-        ffi::chiaki_opus_decoder_get_sink as *const (),
-        ffi::chiaki_opus_decoder_fini as *const (),
         // orientation
         ffi::chiaki_orientation_init as *const (),
         ffi::chiaki_orientation_update as *const (),
@@ -114,7 +106,19 @@ fn public_symbols_resolve_at_link_time() {
         ffi::chiaki_time_now_monotonic_us as *const (),
         ffi::chiaki_socket_set_nonblock as *const (),
     ];
+    // opus 符号只在 feature 开启时存在; 与其余符号一样进同一个容器,
+    // 下面的 is_null 断言一视同仁地覆盖。
+    #[cfg(feature = "opus")]
+    list.extend([
+        ffi::chiaki_opus_encoder_init as *const (),
+        ffi::chiaki_opus_encoder_header as *const (),
+        ffi::chiaki_opus_encoder_frame as *const (),
+        ffi::chiaki_opus_encoder_fini as *const (),
+        ffi::chiaki_opus_decoder_init as *const (),
+        ffi::chiaki_opus_decoder_get_sink as *const (),
+        ffi::chiaki_opus_decoder_fini as *const (),
+    ]);
     // 链接成功后地址恒非空, is_null 只是形式上的最后防线 —
     // 真正的检查发生在本测试的链接阶段。
-    assert!(!addrs.iter().any(|p| p.is_null()));
+    assert!(!list.iter().any(|p| p.is_null()));
 }

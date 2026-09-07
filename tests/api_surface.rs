@@ -89,6 +89,7 @@ fn audio_header_short_buf_rejected() {
 }
 
 #[test]
+#[cfg(feature = "opus")]
 fn opus_encoder_decoder_lifecycle() {
     let log = Log::print_to_stdout(LOG_ALL);
     let enc = OpusEncoder::new(&log);
@@ -101,6 +102,7 @@ fn opus_encoder_decoder_lifecycle() {
 }
 
 #[test]
+#[cfg(feature = "opus")]
 fn opus_frame_length_checked() {
     let log = Log::print_to_stdout(LOG_ALL);
     let mut enc = OpusEncoder::new(&log);

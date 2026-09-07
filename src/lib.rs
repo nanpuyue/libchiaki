@@ -27,6 +27,7 @@ pub mod error;
 pub mod feedback;
 pub mod holepunch;
 pub mod log;
+#[cfg(feature = "opus")]
 pub mod opus;
 pub mod orientation;
 pub mod regist;
@@ -42,6 +43,7 @@ pub use error::Error;
 pub use feedback::*;
 pub use holepunch::*;
 pub use log::*;
+#[cfg(feature = "opus")]
 pub use opus::*;
 pub use orientation::*;
 pub use regist::*;

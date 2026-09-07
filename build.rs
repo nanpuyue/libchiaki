@@ -12,20 +12,6 @@ const STATIC_LIBS: &[&str] = &[
     "protobuf-nanopb",
 ];
 
-// 三平台共用的外部依赖: (pkg-config 名, 库名)。Windows 直接取裸名
-// static=; Linux/macOS 走 pkg-config 探测 (见 link_platform_deps)。
-// pthread/m 不在清单: rustc/std 自行链接 (glibc 2.34 起并入 libc, musl
-// 无独立的 libpthread/libm, 显式链反而破坏全静态); z 是静态 libcurl.a 的
-// 真实依赖, 与其余库一视同仁。
-const PKG_DEPS: &[(&str, &[&str])] = &[
-    ("openssl", &["ssl", "crypto"]),
-    ("opus", &["opus"]),
-    ("json-c", &["json-c"]),
-    ("libevent", &["event"]),
-    ("miniupnpc", &["miniupnpc"]),
-    ("zlib", &["z"]),
-];
-
 #[derive(Clone, Copy, PartialEq)]
 enum TargetOs {
     Windows,
@@ -50,7 +36,7 @@ fn main() {
     // --- link ---
     let (include_dir, lib_dir) = chiaki_prefix();
     link_stack(&lib_dir);
-    link_platform_deps(os);
+    link_platform_libs(os);
 
     // --- bindgen ---
     if os == TargetOs::Windows {
@@ -128,8 +114,30 @@ fn link_stack(lib_dir: &std::path::Path) {
     }
 }
 
-/// 平台差异全部收敛在这里: 共通依赖的链接方式 + 各平台特有依赖。
-fn link_platform_deps(os: TargetOs) {
+/// 平台差异全部收敛在这里: 共通依赖库的链接方式 + 各平台特有库。
+fn link_platform_libs(os: TargetOs) {
+    // 三平台共用的外部依赖: (pkg-config 名, 库名)。Windows 直接取裸名
+    // static=; Linux/macOS 走 pkg-config 探测 (下方循环)。
+    // pthread/m 不在清单: rustc/std 自行链接 (glibc 2.34 起并入 libc, musl
+    // 无独立的 libpthread/libm, 显式链反而破坏全静态); z 是静态 libcurl.a
+    // 的真实依赖, 与其余库一视同仁。
+    // opus 由 cargo feature 控制 (默认开启): 纯透传场景 (chiaki-stream)
+    // 关闭时把它从依赖闭包移除, 此时 C 库须以 CHIAKI_LIB_ENABLE_OPUS=OFF
+    // 构建与之对应。
+    let pkg_libs: Vec<(&'static str, &[&str])> = {
+        let mut libs: Vec<(&'static str, &[&str])> = vec![
+            ("openssl", &["ssl", "crypto"]),
+            ("json-c", &["json-c"]),
+            ("libevent", &["event"]),
+            ("miniupnpc", &["miniupnpc"]),
+            ("zlib", &["z"]),
+        ];
+        if env::var_os("CARGO_FEATURE_OPUS").is_some() {
+            libs.push(("opus", &["opus"]));
+        }
+        libs
+    };
+
     match os {
         TargetOs::Windows => {
             // mingw64 的库 (ssl/opus/event 等的 .a 与 .dll.a) 所在目录,
@@ -147,12 +155,12 @@ fn link_platform_deps(os: TargetOs) {
             }
             // MSYS2 ships both a static <lib>.a and an import <lib>.dll.a.
             // `static=` pins the former so the final exe carries no extra
-            // DLL deps beyond the OS. Same bare-name list as PKG_DEPS'
+            // DLL deps beyond the OS. Same bare-name list as pkg_libs'
             // fallback column: third-party static curl's optional deps
             // (ssh2/psl/idn2/unistring/iconv/brotli/zstd) are disabled in
             // build-libchiaki.sh, so libcurl.a references none of them
             // (nm-verified); only zlib survives.
-            for &(_, fallback) in PKG_DEPS {
+            for &(_, fallback) in &pkg_libs {
                 for lib in fallback {
                     println!("cargo:rustc-link-lib=static={lib}");
                 }
@@ -181,7 +189,7 @@ fn link_platform_deps(os: TargetOs) {
             //            名单外的库名忽略并警告
             let static_env = env::var("LIBCHIAKI_STATIC_LIBS").ok();
             let static_list: Option<Vec<&str>> = static_env.as_deref().map(|v| match v.trim() {
-                "all" => PKG_DEPS
+                "all" => pkg_libs
                     .iter()
                     .flat_map(|(_, l)| l.iter().copied())
                     .collect(),
@@ -195,19 +203,19 @@ fn link_platform_deps(os: TargetOs) {
                     let unknown: Vec<&str> = list
                         .iter()
                         .copied()
-                        .filter(|n| !PKG_DEPS.iter().any(|(_, l)| l.contains(n)))
+                        .filter(|n| !pkg_libs.iter().any(|(_, l)| l.contains(n)))
                         .collect();
                     if !unknown.is_empty() {
                         println!(
                             "cargo:warning=LIBCHIAKI_STATIC_LIBS: ignoring unknown libs: {}",
                             unknown.join(", ")
                         );
-                        list.retain(|n| PKG_DEPS.iter().any(|(_, l)| l.contains(n)));
+                        list.retain(|n| pkg_libs.iter().any(|(_, l)| l.contains(n)));
                     }
                     list
                 }
             });
-            for &(pc, libs) in PKG_DEPS {
+            for &(pc, libs) in &pkg_libs {
                 // pkg-config 只负责定位搜索路径; 探测成功不代表有静态库。
                 let dirs = match pkg_config::Config::new().cargo_metadata(false).probe(pc) {
                     Ok(lib) => {

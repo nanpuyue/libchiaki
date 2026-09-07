@@ -5,8 +5,11 @@ edition = "2024"
 description = "Safe Rust bindings for libchiaki (chiaki-ng's core library)"
 authors = ["南浦月 <nanpuyue@gmail.com>"]
 license = "AGPL-3.0-only"
-# 原生依赖声明: 同一构建图中只允许一份, 也是 -sys crate 的惯例标识。
 links = "chiaki"
+
+[features]
+default = ["opus"]
+opus = []
 
 [build-dependencies]
 bindgen = "0.72"
