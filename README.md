@@ -41,25 +41,32 @@ it (the linker, the sysroot libraries and libclang for bindgen are all taken
 from that tree). On Linux/macOS plain `cargo build` is enough (system deps are
 located via pkg-config).
 
-## curl configuration requirements (important)
+## C library build requirements
 
-chiaki uses curl only for HTTP/1.1 + WebSocket (holepunching). This crate links
-`libcurl.a` assuming every feature that drags in an extra external library is
-disabled. If you build libchiaki yourself, configure curl with at least:
+The binding statically links `libchiaki.a` and its bundled deps, and assumes
+specific C-side build options; the two must stay in sync or linking fails.
 
-```cmake
--DUSE_NGHTTP2=OFF        # libnghttp2
--DCURL_USE_LIBSSH2=OFF   # libssh2
--DUSE_LIBIDN2=OFF        # libidn2 + libunistring + libiconv
--DUSE_LIBPSL=OFF         # libpsl
--DCURL_BROTLI=OFF        # auto-enabled if brotli is installed
--DCURL_ZSTD=OFF          # auto-enabled if zstd is installed
-```
+- **curl** — chiaki uses curl only for HTTP/1.1 + WebSocket (holepunching).
+  This crate links `libcurl.a` assuming every feature that drags in an extra
+  external library is disabled; the C library must be built with the
+  following `cmake` options:
 
-With these off, `libcurl.a` references nothing beyond OpenSSL and zlib
-(nm-verifiable: no undefined `idn2`/`psl`/`ssh2`/`nghttp` symbols). Protocol
-disables (FTP/SMTP/...) are optional — they shrink the binary but add no
-dependencies, so this crate does not require them.
+  ```cmake
+  -DUSE_NGHTTP2=OFF        # libnghttp2
+  -DCURL_USE_LIBSSH2=OFF   # libssh2
+  -DUSE_LIBIDN2=OFF        # libidn2 + libunistring + libiconv
+  -DUSE_LIBPSL=OFF         # libpsl
+  -DCURL_BROTLI=OFF        # auto-enabled if brotli is installed
+  -DCURL_ZSTD=OFF          # auto-enabled if zstd is installed
+  -DUSE_LIBRTMP=OFF        # auto-enabled if librtmp is installed
+  -DCURL_USE_GSSAPI=OFF    # auto-enabled if krb5 is installed
+  -DCURL_USE_LIBSSH=OFF    # auto-enabled if libssh is installed
+  ```
+
+  With these off, `libcurl.a` references nothing beyond OpenSSL and zlib
+  (nm-verifiable). Protocol disables (FTP/SMTP/...) are optional — they
+  shrink the binary but add no dependencies, so this crate does not require
+  them.
 
 `LIBCLANG_PATH` (libclang for bindgen) also influences the build; changing it
 re-triggers the build script.
