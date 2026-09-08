@@ -23,6 +23,11 @@
 #   BUILD_TYPE          default Release
 #   JOBS                default nproc
 #   SKIP_DEPS=1         skip dependency check/install entirely
+#   CHIAKI_SKIP_CLONE=1 skip cloning $CHIAKI_REPO; use the existing
+#                       $CHIAKI_SRC_DIR as-is (a git dir still gets
+#                       checked out to $CHIAKI_VERSION; a plain dir
+#                       (e.g. CI artifact) is used as-is — submodules
+#                       must already be populated inside it)
 #
 #   Dependencies are checked first (commands + pkg-config modules +
 #   python-protobuf); packages are only installed when something is
@@ -220,7 +225,19 @@ submodules_present() {
 	done
 }
 
-if [ -d "$SRC/.git" ]; then
+# CHIAKI_SKIP_CLONE=1: 源码已由调用方提供 (如 CI 下载/解压的 artifact),
+# 跳过 clone 直接用; 若是 git 目录仍会切到 CHIAKI_VERSION (与复用分支一致)。
+if [ "${CHIAKI_SKIP_CLONE:-0}" = "1" ]; then
+	log "CHIAKI_SKIP_CLONE=1: using provided source $SRC"
+	[ -d "$SRC" ] || { echo "source dir $SRC not found" >&2; exit 1; }
+	if [ -d "$SRC/.git" ]; then
+		if ! git -C "$SRC" checkout -q "$CHIAKI_VERSION" 2>/dev/null; then
+			log "fetching to find $CHIAKI_VERSION"
+			git -C "$SRC" fetch --tags origin
+			git -C "$SRC" checkout -q "$CHIAKI_VERSION"
+		fi
+	fi
+elif [ -d "$SRC/.git" ]; then
 	log "using existing git source: $SRC"
 	# 换 CHIAKI_VERSION 重跑时必须真的切过去 (此前只在全新 clone 时
 	# checkout, 已存在的目录会静默构建旧版本)。本地没有该 ref 时先
