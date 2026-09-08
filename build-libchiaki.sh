@@ -120,8 +120,8 @@ DNF_PKGS="git cmake ninja-build pkgconf gcc openssl-devel opus-devel \
 BREW_PKGS="git cmake ninja pkg-config openssl opus json-c libevent miniupnpc python"
 
 deps_missing=()
-check_cmd() { command -v "$1" >/dev/null 2>&1 || deps_missing+=("$1"); }
-check_lib() { pkg-config --exists "$1" 2>/dev/null || deps_missing+=("$1"); }
+check_cmd() { for c in "$@"; do command -v "$c" >/dev/null 2>&1 || deps_missing+=("$c"); done; }
+check_lib() { for l in "$@"; do pkg-config --exists "$l" 2>/dev/null || deps_missing+=("$l"); done; }
 check_pyproto() { "$1" -c 'import google.protobuf' >/dev/null 2>&1 || deps_missing+=("$2"); }
 
 	if [ "$SKIP_DEPS" = "1" ]; then
